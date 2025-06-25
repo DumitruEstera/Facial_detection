@@ -12,7 +12,12 @@ const MilitarySecurityInterface = () => {
   ]);
   const [detectedFaces, setDetectedFaces] = useState([]);
   const [isCapturing, setIsCapturing] = useState(false);
-  const [newPersonName, setNewPersonName] = useState('');
+  
+  // Updated for separate first and last name
+  const [newPersonFirstName, setNewPersonFirstName] = useState('');
+  const [newPersonLastName, setNewPersonLastName] = useState('');
+  const [newPersonRank, setNewPersonRank] = useState('STUDENT');
+  
   const [systemStats, setSystemStats] = useState({
     totalPersons: 42,
     activeAlerts: 0,
@@ -22,6 +27,7 @@ const MilitarySecurityInterface = () => {
   const [videoFrame, setVideoFrame] = useState(null);
   const [isConnected, setIsConnected] = useState(false);
   const [connectionError, setConnectionError] = useState(null);
+  const [databaseStatus, setDatabaseStatus] = useState(null);
   
   const videoRef = useRef(null);
   const wsRef = useRef(null);
@@ -29,6 +35,12 @@ const MilitarySecurityInterface = () => {
   // API base URL
   const API_BASE = 'http://localhost:8000';
   const WS_BASE = 'ws://localhost:8000';
+
+  // Rank options for dropdown
+  const rankOptions = [
+    'STUDENT', 'SOLDIER', 'CORPORAL', 'SERGEANT', 
+    'LIEUTENANT', 'CAPTAIN', 'MAJOR', 'COLONEL', 'GENERAL'
+  ];
 
   // Simulate real-time clock
   useEffect(() => {
@@ -66,6 +78,11 @@ const MilitarySecurityInterface = () => {
         setConnectionError(null);
         console.log('✅ Connected to backend:', data);
         
+        // Check database status
+        const dbTestResponse = await fetch(`${API_BASE}/api/database-test`);
+        const dbTestData = await dbTestResponse.json();
+        setDatabaseStatus(dbTestData);
+        
         // Update system stats from backend
         const statusResponse = await fetch(`${API_BASE}/api/status`);
         const statusData = await statusResponse.json();
@@ -74,6 +91,18 @@ const MilitarySecurityInterface = () => {
           ...prev,
           totalPersons: statusData.known_faces || prev.totalPersons
         }));
+        
+        // Add success alert
+        const successAlert = {
+          id: Date.now(),
+          time: new Date().toLocaleString('ro-RO'),
+          type: "System Connection",
+          description: `Backend conectat cu succes. Database: ${statusData.database_available ? 'disponibil' : 'indisponibil'}`,
+          severity: "Success",
+          status: "Resolved"
+        };
+        setAlerts(prev => [successAlert, ...prev.slice(0, 9)]);
+        
       } else {
         throw new Error('Backend not responding');
       }
@@ -238,15 +267,23 @@ const MilitarySecurityInterface = () => {
   };
 
   const handleCaptureFace = async () => {
-    if (!newPersonName.trim()) {
-      alert("Vă rugăm să introduceți numele persoanei!");
+    // Updated validation for separate names
+    if (!newPersonFirstName.trim() || !newPersonLastName.trim()) {
+      alert("Vă rugăm să introduceți prenumele și numele persoanei!");
       return;
     }
     
     setIsCapturing(true);
     
     try {
-      const response = await fetch(`${API_BASE}/api/register-face?name=${encodeURIComponent(newPersonName)}`, {
+      // Updated API call with separate first_name and last_name
+      const params = new URLSearchParams({
+        first_name: newPersonFirstName.trim(),
+        last_name: newPersonLastName.trim(),
+        rank: newPersonRank
+      });
+      
+      const response = await fetch(`${API_BASE}/api/register-face?${params}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -258,8 +295,8 @@ const MilitarySecurityInterface = () => {
       if (response.ok) {
         const newPerson = {
           id: knownPersons.length + 1,
-          name: newPersonName,
-          role: "Personal",
+          name: `${newPersonFirstName} ${newPersonLastName}`,
+          role: newPersonRank,
           lastSeen: new Date().toLocaleString('ro-RO'),
           status: "Authorized"
         };
@@ -269,27 +306,51 @@ const MilitarySecurityInterface = () => {
           ...prev, 
           totalPersons: data.total_known_faces || prev.totalPersons + 1 
         }));
-        setNewPersonName('');
+        
+        // Clear form
+        setNewPersonFirstName('');
+        setNewPersonLastName('');
+        setNewPersonRank('STUDENT');
         
         const captureAlert = {
           id: Date.now(),
           time: new Date().toLocaleString('ro-RO'),
           type: "Face Registration",
-          description: data.message || `Noua față a fost înregistrată cu succes pentru: ${newPersonName}`,
+          description: data.message || `Noua față a fost înregistrată cu succes pentru: ${newPersonFirstName} ${newPersonLastName}`,
           severity: "Success",
           status: "Resolved"
         };
         setAlerts(prev => [captureAlert, ...prev]);
       } else {
-        throw new Error(data.detail || 'Failed to register face');
+        // Better error handling
+        let errorMessage = 'Failed to register face';
+        
+        if (data.detail) {
+          if (Array.isArray(data.detail)) {
+            errorMessage = data.detail.map(err => err.msg || err.message || err).join(', ');
+          } else if (typeof data.detail === 'object') {
+            errorMessage = JSON.stringify(data.detail);
+          } else {
+            errorMessage = data.detail;
+          }
+        }
+        
+        throw new Error(errorMessage);
       }
     } catch (error) {
       console.error('Error registering face:', error);
+      let errorMessage = error.message;
+      
+      // Handle cases where error.message might be an object
+      if (typeof errorMessage === 'object') {
+        errorMessage = JSON.stringify(errorMessage);
+      }
+      
       const errorAlert = {
         id: Date.now(),
         time: new Date().toLocaleString('ro-RO'),
         type: "Registration Error",
-        description: `Eroare la înregistrarea feței: ${error.message}`,
+        description: `Eroare la înregistrarea feței: ${errorMessage}`,
         severity: "High",
         status: "Active"
       };
@@ -322,7 +383,7 @@ const MilitarySecurityInterface = () => {
             <Shield className="h-8 w-8 text-blue-400" />
             <div>
               <h1 className="text-xl font-bold">Sistem Securitate Militară</h1>
-              <p className="text-sm text-gray-400">Recunoaștere Facială YUNET - v2.0</p>
+              <p className="text-sm text-gray-400">Recunoaștere Facială YUNET + PostgreSQL - v2.0</p>
             </div>
           </div>
           
@@ -338,6 +399,13 @@ const MilitarySecurityInterface = () => {
               <div className={`h-3 w-3 rounded-full ${isConnected ? 'bg-green-400' : 'bg-red-400'}`}></div>
               <span className="text-sm">
                 {isConnected ? 'Backend Conectat' : 'Backend Deconectat'}
+              </span>
+            </div>
+            
+            <div className="flex items-center space-x-2">
+              <div className={`h-3 w-3 rounded-full ${databaseStatus?.status === 'success' ? 'bg-green-400' : 'bg-red-400'}`}></div>
+              <span className="text-sm">
+                {databaseStatus?.status === 'success' ? 'Database Conectat' : 'Database Deconectat'}
               </span>
             </div>
             
@@ -360,6 +428,13 @@ const MilitarySecurityInterface = () => {
             >
               Reconectare
             </button>
+          </div>
+        )}
+        
+        {/* Database Status Banner */}
+        {databaseStatus && databaseStatus.status === 'error' && (
+          <div className="mt-4 bg-yellow-900/20 border border-yellow-500 text-yellow-400 px-4 py-2 rounded">
+            <span>Database Warning: {databaseStatus.message}</span>
           </div>
         )}
       </header>
@@ -395,10 +470,12 @@ const MilitarySecurityInterface = () => {
               </div>
               
               <div className="bg-gray-700 p-3 rounded-lg flex items-center space-x-3">
-                <Clock className="h-6 w-6 text-purple-400" />
+                <Database className="h-6 w-6 text-purple-400" />
                 <div>
-                  <div className="text-sm text-gray-400">Uptime Sistem</div>
-                  <div className="text-sm font-bold">{systemStats.systemUptime}</div>
+                  <div className="text-sm text-gray-400">Database Status</div>
+                  <div className="text-sm font-bold">
+                    {databaseStatus?.status === 'success' ? 'Conectat' : 'Deconectat'}
+                  </div>
                 </div>
               </div>
             </div>
@@ -421,8 +498,8 @@ const MilitarySecurityInterface = () => {
                     {/* Camera info overlay */}
                     <div className="absolute top-4 left-4 bg-black/70 p-2 rounded text-sm">
                       <div>Camera 1 - Intrare Principală</div>
-                      <div className="text-green-400">LIVE • Facial Recognition Active</div>
-                      <div className="text-gray-400">Detector: YUNET | Recognizer: LBPH</div>
+                      <div className="text-green-400">LIVE • Database Facial Recognition Active</div>
+                      <div className="text-gray-400">Detector: YUNET | Database: PostgreSQL + pgvector</div>
                       <div className="text-blue-400">Faces: {detectedFaces.length}</div>
                     </div>
                     
@@ -466,7 +543,7 @@ const MilitarySecurityInterface = () => {
               <div className="flex items-center space-x-4">
                 <button
                   onClick={isSystemActive ? handleStopSystem : handleStartSystem}
-                  disabled={!isConnected}
+                  disabled={!isConnected || (databaseStatus?.status !== 'success')}
                   className={`px-6 py-2 rounded-lg font-semibold flex items-center space-x-2 transition-colors disabled:bg-gray-600 disabled:cursor-not-allowed ${
                     isSystemActive 
                       ? 'bg-red-600 hover:bg-red-700 text-white' 
@@ -477,24 +554,52 @@ const MilitarySecurityInterface = () => {
                   <span>{isSystemActive ? 'Oprire Sistem' : 'Pornire Sistem'}</span>
                 </button>
                 
-                {!isConnected && (
-                  <span className="text-red-400 text-sm">Backend deconectat</span>
+                {(!isConnected || databaseStatus?.status !== 'success') && (
+                  <span className="text-red-400 text-sm">
+                    {!isConnected ? 'Backend deconectat' : 'Database deconectat'}
+                  </span>
                 )}
               </div>
 
+              {/* Updated Registration Form */}
               <div className="flex items-center space-x-4">
                 <div className="flex items-center space-x-2">
                   <input
                     type="text"
-                    placeholder="Nume pentru înregistrare"
-                    value={newPersonName}
-                    onChange={(e) => setNewPersonName(e.target.value)}
-                    className="bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white placeholder-gray-400 focus:outline-none focus:border-blue-500"
-                    disabled={!isSystemActive || !isConnected}
+                    placeholder="Prenume"
+                    value={newPersonFirstName}
+                    onChange={(e) => setNewPersonFirstName(e.target.value)}
+                    className="bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white placeholder-gray-400 focus:outline-none focus:border-blue-500 w-28"
+                    disabled={!isSystemActive || !isConnected || databaseStatus?.status !== 'success'}
                   />
+                  <input
+                    type="text"
+                    placeholder="Nume"
+                    value={newPersonLastName}
+                    onChange={(e) => setNewPersonLastName(e.target.value)}
+                    className="bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white placeholder-gray-400 focus:outline-none focus:border-blue-500 w-28"
+                    disabled={!isSystemActive || !isConnected || databaseStatus?.status !== 'success'}
+                  />
+                  <select
+                    value={newPersonRank}
+                    onChange={(e) => setNewPersonRank(e.target.value)}
+                    className="bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white focus:outline-none focus:border-blue-500"
+                    disabled={!isSystemActive || !isConnected || databaseStatus?.status !== 'success'}
+                  >
+                    {rankOptions.map(rank => (
+                      <option key={rank} value={rank}>{rank}</option>
+                    ))}
+                  </select>
                   <button
                     onClick={handleCaptureFace}
-                    disabled={!isSystemActive || isCapturing || !newPersonName.trim() || !isConnected}
+                    disabled={
+                      !isSystemActive || 
+                      isCapturing || 
+                      !newPersonFirstName.trim() || 
+                      !newPersonLastName.trim() || 
+                      !isConnected ||
+                      databaseStatus?.status !== 'success'
+                    }
                     className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed rounded-lg font-semibold flex items-center space-x-2 transition-colors"
                   >
                     <UserPlus className="h-4 w-4" />
