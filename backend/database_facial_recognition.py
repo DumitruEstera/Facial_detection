@@ -133,7 +133,7 @@ class OptimizedDatabaseFacialRecognitionSystem:
                     model_path,
                     "",
                     (640, 480),
-                    score_threshold=0.7,
+                    score_threshold=0.5,
                     nms_threshold=0.3,
                     top_k=5000
                 )
@@ -415,7 +415,7 @@ class OptimizedDatabaseFacialRecognitionSystem:
                     if current_encoding is not None and len(current_encoding) == 512:
                         # Use database vector similarity search
                         similar_faces = await self.db_manager.find_similar_faces(
-                            current_encoding, threshold=0.7, limit=1
+                            current_encoding, threshold=0.5, limit=1
                         )
                         
                         if similar_faces:

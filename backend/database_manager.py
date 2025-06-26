@@ -1,5 +1,6 @@
 """
-Database models and manager for the Military Security Facial Recognition System
+DEBUG version of Database manager to show similarity scores
+This will help us understand why recognition isn't working
 """
 
 import os
@@ -140,12 +141,26 @@ class DatabaseManager:
             logger.error(f"❌ Error getting/creating personnel: {e}")
             raise
     
+    def _prepare_vector_for_db(self, vector: np.ndarray) -> List[float]:
+        """Convert numpy array to list of floats for pgvector"""
+        if isinstance(vector, np.ndarray):
+            # Convert to list of Python floats
+            return [float(x) for x in vector.flatten()]
+        elif isinstance(vector, list):
+            # If it's already a list, ensure all elements are floats
+            return [float(x) for x in vector]
+        else:
+            raise ValueError(f"Unsupported vector type: {type(vector)}")
+    
     async def save_face_encoding(self, personnel_id: int, encoding: np.ndarray, 
                                confidence_score: float = 0.0, 
                                image_path: str = "", is_primary: bool = True) -> bool:
         """Save face encoding to database"""
         try:
             async with self.pool.acquire() as conn:
+                # Register vector type for this connection
+                await register_vector(conn)
+                
                 # If this is set as primary, unset other primary encodings for this person
                 if is_primary:
                     await conn.execute(
@@ -153,14 +168,23 @@ class DatabaseManager:
                         personnel_id
                     )
                 
-                # Insert new encoding
+                # Convert numpy array to list of floats
+                vector_list = self._prepare_vector_for_db(encoding)
+                
+                # DEBUG: Print encoding info
+                print(f"🔍 DEBUG: Saving encoding for personnel {personnel_id}")
+                print(f"    Vector shape: {encoding.shape}")
+                print(f"    Vector length: {len(vector_list)}")
+                print(f"    Vector sample: {vector_list[:5]}...")
+                
+                # Insert new encoding - let pgvector handle the conversion automatically
                 await conn.execute(
                     """
                     INSERT INTO face_encodings (personnel_id, encoding_vector, confidence_score, 
                                               training_image_path, is_primary)
                     VALUES ($1, $2, $3, $4, $5)
                     """,
-                    personnel_id, encoding.tolist(), confidence_score, image_path, is_primary
+                    personnel_id, vector_list, confidence_score, image_path, is_primary
                 )
                 
                 logger.info(f"✅ Saved face encoding for personnel ID: {personnel_id}")
@@ -174,6 +198,9 @@ class DatabaseManager:
         """Get all face encodings from database"""
         try:
             async with self.pool.acquire() as conn:
+                # Register vector type for this connection
+                await register_vector(conn)
+                
                 rows = await conn.fetch(
                     """
                     SELECT 
@@ -188,7 +215,19 @@ class DatabaseManager:
                 
                 encodings = []
                 for row in rows:
-                    encoding_array = np.array(row['encoding_vector'], dtype=np.float32)
+                    # The encoding_vector comes back as a list from the database
+                    encoding_list = row['encoding_vector']
+                    if isinstance(encoding_list, list):
+                        encoding_array = np.array(encoding_list, dtype=np.float32)
+                    else:
+                        # If it's already an array, use it as is
+                        encoding_array = np.array(encoding_list, dtype=np.float32)
+                    
+                    # DEBUG: Print loaded encoding info
+                    print(f"🔍 DEBUG: Loaded encoding for {row['full_name']}")
+                    print(f"    Vector shape: {encoding_array.shape}")
+                    print(f"    Vector sample: {encoding_array[:5]}")
+                    
                     encodings.append((row['personnel_id'], row['full_name'], encoding_array))
                 
                 logger.info(f"✅ Retrieved {len(encodings)} face encodings from database")
@@ -199,10 +238,23 @@ class DatabaseManager:
             return []
     
     async def find_similar_faces(self, query_encoding: np.ndarray, 
-                               threshold: float = 0.8, limit: int = 5) -> List[Dict]:
+                               threshold: float = 0.5, limit: int = 5) -> List[Dict]:  # LOWERED THRESHOLD
         """Find similar faces using vector similarity search"""
         try:
             async with self.pool.acquire() as conn:
+                # Register vector type for this connection
+                await register_vector(conn)
+                
+                # Convert query encoding to list of floats
+                vector_list = self._prepare_vector_for_db(query_encoding)
+                
+                # DEBUG: Print query encoding info
+                print(f"🔍 DEBUG: Searching for similar faces")
+                print(f"    Query vector shape: {query_encoding.shape}")
+                print(f"    Query vector sample: {vector_list[:5]}...")
+                print(f"    Using threshold: {threshold}")
+                
+                # Use the vector list directly - pgvector will handle the conversion
                 rows = await conn.fetch(
                     """
                     SELECT 
@@ -218,12 +270,19 @@ class DatabaseManager:
                     ORDER BY fe.encoding_vector <=> $1
                     LIMIT $2
                     """,
-                    query_encoding.tolist(), limit
+                    vector_list, limit
                 )
                 
                 results = []
+                print(f"🔍 DEBUG: Found {len(rows)} potential matches:")
+                
                 for row in rows:
                     similarity = row['similarity']
+                    distance = row['distance']
+                    name = row['full_name']
+                    
+                    print(f"    {name}: similarity={similarity:.4f}, distance={distance:.4f}")
+                    
                     if similarity >= threshold:
                         results.append({
                             'personnel_id': row['personnel_id'],
@@ -233,7 +292,11 @@ class DatabaseManager:
                             'similarity': similarity,
                             'distance': row['distance']
                         })
+                        print(f"      ✅ MATCH! Above threshold {threshold}")
+                    else:
+                        print(f"      ❌ Below threshold {threshold}")
                 
+                logger.info(f"✅ Found {len(results)} similar faces above threshold {threshold}")
                 return results
                 
         except Exception as e:
