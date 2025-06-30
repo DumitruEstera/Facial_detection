@@ -91,6 +91,9 @@ class DatabaseManager:
     def log_access(self, person_id: int, camera_id: str, confidence: float):
         """Log an access event"""
         try:
+            # Convert numpy float to Python float
+            confidence = float(confidence)
+            
             query = """
                 INSERT INTO access_logs (person_id, camera_id, confidence)
                 VALUES (%s, %s, %s)
