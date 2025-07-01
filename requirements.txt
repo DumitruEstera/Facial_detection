@@ -1,0 +1,29 @@
+# Core dependencies
+opencv-python>=4.8.0
+numpy>=1.24.0
+Pillow>=10.0.0
+
+# Database
+psycopg2-binary>=2.9.0
+
+# Face recognition dependencies
+tensorflow>=2.13.0
+faiss-cpu>=1.7.4  # Use faiss-gpu if you have CUDA support
+
+# License plate recognition dependencies
+ultralytics>=8.0.0  # YOLOv8
+easyocr>=1.7.0
+torch>=2.0.0  # Will be installed with ultralytics/easyocr
+torchvision>=0.15.0
+
+# GUI dependencies (already included in Python standard library)
+# tkinter - comes with Python
+
+# Optional dependencies for better performance
+# tensorflow-gpu>=2.13.0  # If you have NVIDIA GPU with CUDA
+# onnxruntime-gpu>=1.15.0  # For GPU acceleration of ONNX models
+
+# Development dependencies (optional)
+# pytest>=7.4.0
+# black>=23.0.0
+# flake8>=6.0.0
