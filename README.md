@@ -31,7 +31,7 @@ This application enhances security through real-time analysis of video recording
 ### Computer Vision & AI
 - **OpenCV (cv2)**: Video capture, image processing, and computer vision operations
 - **YuNet**: State-of-the-art face detection model (OpenCV's face detector)
-- **FaceNet**: Deep learning model for face feature extraction (128-dimensional embeddings)
+- **FaceNet**: Deep learning model for face feature extraction (512-dimensional embeddings)
 - **TensorFlow/Keras**: Deep learning framework for neural network operations
 
 ### Database & Search
@@ -154,5 +154,4 @@ python gui_application.py
 - ✅ GUI and CLI interfaces
 - ✅ Access logging and monitoring
 
-**Note:** The current FaceNet implementation uses a placeholder model. For production use, replace with a pre-trained FaceNet model for optimal recognition accuracy.
 

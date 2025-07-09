@@ -35,14 +35,14 @@ class FacialRecognitionSystem:
         self.feature_extractor = FaceNetFeatureExtractor()
         
         print("Initializing Faiss index...")
-        self.faiss_index = FaissIndex()
+        self.faiss_index = FaissIndex(dimension=self.feature_extractor.embedding_dim)
         
         # Load existing embeddings from database
         self._load_embeddings_from_db()
         
         # Recognition parameters
-        self.recognition_threshold = 0.6
-        self.min_confidence = 0.8
+        self.recognition_threshold = 1.0  # L2 distance threshold for 512‑D FaceNet
+        self.min_confidence = 0.6
         
         # Threading for performance
         self.frame_queue = queue.Queue(maxsize=10)
