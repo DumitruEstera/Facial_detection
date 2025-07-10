@@ -36,7 +36,7 @@ class FacialRecognitionSystem:
         self._load_embeddings_from_db()
 
         # Recognition parameters
-        self.recognition_threshold = 1.4  # L2 distance threshold
+        self.recognition_threshold = 1.5  # L2 distance threshold
         self.min_confidence = 0.6
 
         # Queues for multi‑threaded processing

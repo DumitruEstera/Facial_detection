@@ -16,7 +16,7 @@ class IntegratedSecurityGUI:
         
         # Initialize systems
         self.face_system = FacialRecognitionSystem(db_config, camera_id="0")
-        self.plate_system = LicensePlateRecognitionSystem(db_config, camera_id="0")
+        self.plate_system = LicensePlateRecognitionSystem(db_config)
         
         # Video capture
         self.cap = None
@@ -298,13 +298,12 @@ class IntegratedSecurityGUI:
                             annotated_frame = face_frame
                             
                     if mode in ['plate', 'both']:
-                        plate_frame, plate_results = self.plate_system.process_frame(frame)
+                        plate_results = self.plate_system.process_frame(frame)
+                        plate_frame = self.plate_system.draw_outputs(frame.copy(), plate_results)
                         if mode == 'plate':
                             annotated_frame = plate_frame
                             
                     if mode == 'both':
-                        # Combine annotations from both systems
-                        # This is simplified - you might want more sophisticated combination
                         annotated_frame = plate_frame
                         
                     # Add to queue
@@ -438,7 +437,6 @@ class IntegratedSecurityGUI:
         """Handle window closing"""
         self.stop_camera()
         self.face_system.cleanup()
-        self.plate_system.cleanup()
         self.root.destroy()
 
 

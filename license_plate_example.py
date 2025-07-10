@@ -35,9 +35,7 @@ def main():
     
     # Initialize system
     system = LicensePlateRecognitionSystem(
-        DB_CONFIG, 
-        camera_id=str(args.camera),
-        save_images=args.save_images
+        DB_CONFIG
     )
     
     try:
@@ -87,8 +85,6 @@ def main():
             
     except KeyboardInterrupt:
         print("\nStopping system...")
-    finally:
-        system.cleanup()
         
 if __name__ == "__main__":
     main()
