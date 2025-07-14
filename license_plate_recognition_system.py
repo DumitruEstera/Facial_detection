@@ -23,7 +23,6 @@ from datetime import datetime
 
 from database_manager import DatabaseManager
 
-
 # ------------------------------------------------------------------
 # Helper utilities
 # ------------------------------------------------------------------
@@ -78,6 +77,9 @@ class LicensePlateRecognitionSystem:
                  plate_detector_weights: str | Path = "best.pt",
                  ocr_lang: str = "en"):
         self.db = db
+
+        self.db_manager = DatabaseManager(**self.db)
+        self.db_manager.connect()
 
         plate_path = Path(plate_detector_weights)
         if not plate_path.exists():
@@ -138,11 +140,15 @@ class LicensePlateRecognitionSystem:
             # Lookup plate owner and determine authorization
             # If db is a dict, use get; otherwise, call lookup method
             print("Numarul de inmatriculare al masinii este: ", text)
-            if isinstance(self.db, dict):
-                owner = self.db.get(text)
-            else:
-                owner = self.db.lookup_owner_by_plate(text)
-            authorised = bool(owner and text)
+
+            owner = "Unknown car"
+            authorised = False
+
+            if conf > 0.80 and text:
+                owner_name = self.db_manager.lookup_owner_by_plate(text)
+                if owner_name:
+                    owner = owner_name
+                    authorised = True
 
             # Collect result
             ts = datetime.now()
@@ -158,11 +164,35 @@ class LicensePlateRecognitionSystem:
                 "bbox": (x1, y1, x2, y2),
                 "plate": plate_number,
                 "confidence": float(conf),
-                "owner": owner if authorised else "Unknown car",
+                "owner": owner,
                 "authorised": authorised,
             })
 
         return outs
+    
+    def register_plate(self, plate_number: str, vehicle_type: str = None,
+                       owner_name: str = None, owner_id: str = None,
+                       is_authorized: bool = True, expiry_date: datetime = None,
+                       notes: str = None) -> bool:
+        """
+        Register a new license plate in the database.
+        Returns True if successful, False if already exists or error occurred.
+        """
+        try:
+            plate_id = self.db.add_license_plate(
+                plate_number=plate_number,
+                vehicle_type=vehicle_type,
+                owner_name=owner_name,
+                owner_id=owner_id,
+                is_authorized=is_authorized,
+                expiry_date=expiry_date,
+                notes=notes
+            )
+            print(f"Registered plate with ID: {plate_id}")
+            return True
+        except Exception as e:
+            print(f"[!] Failed to register plate '{plate_number}': {e}")
+            return False
 
     # --------------------------------------------------------------
     @staticmethod

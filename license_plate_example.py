@@ -6,6 +6,7 @@ Example usage of the License Plate Recognition System
 import sys
 import argparse
 from license_plate_recognition_system import LicensePlateRecognitionSystem
+from database_manager import DatabaseManager
 
 # Database configuration
 DB_CONFIG = {
@@ -33,10 +34,11 @@ def main():
     
     args = parser.parse_args()
     
-    # Initialize system
-    system = LicensePlateRecognitionSystem(
-        DB_CONFIG
-    )
+    db_manager = DatabaseManager(**DB_CONFIG)
+    db_manager.connect()
+    
+    # Initialize system with the DatabaseManager object
+    system = LicensePlateRecognitionSystem(db_manager)
     
     try:
         if args.mode == 'register':
@@ -85,6 +87,9 @@ def main():
             
     except KeyboardInterrupt:
         print("\nStopping system...")
+    finally:
+        # Always close database connection
+        db_manager.disconnect()
         
 if __name__ == "__main__":
     main()

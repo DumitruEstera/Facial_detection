@@ -233,6 +233,15 @@ class DatabaseManager:
         except Exception as e:
             print(f"Error retrieving license plate: {e}")
             raise
+
+    def lookup_owner_by_plate(self, plate_number: str) -> Optional[str]:
+        """Get owner name by plate number"""
+        try:
+            plate_info = self.get_license_plate(plate_number)
+            return plate_info['owner_name'] if plate_info else None
+        except Exception as e:
+            print(f"Error looking up owner for plate {plate_number}: {e}")
+            return None
             
     def update_license_plate_authorization(self, plate_number: str, is_authorized: bool):
         """Update license plate authorization status"""
