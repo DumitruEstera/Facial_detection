@@ -22,7 +22,6 @@ from paddleocr import PaddleOCR         # PP‑LPR recogniser
 from datetime import datetime
 
 from database_manager import DatabaseManager
-from vehicle_detection import YOLOv8VehicleDetector
 
 
 # ------------------------------------------------------------------
@@ -38,14 +37,34 @@ def expand_bbox(bbox: Tuple[int, int, int, int], pad_ratio: float,
             min(w, x2 + pad_x), min(h, y2 + pad_y))
 
 def preprocess_plate(img: np.ndarray) -> np.ndarray:
-    up = cv2.resize(img, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
-    gray = cv2.cvtColor(up, cv2.COLOR_BGR2GRAY)
-    eq = cv2.createCLAHE(2.0, (8, 8)).apply(gray)
-    den = cv2.bilateralFilter(eq, 9, 75, 75)
-    bin_img = cv2.adaptiveThreshold(den, 255,
-                                    cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                    cv2.THRESH_BINARY, 31, 5)
-    return bin_img
+    # Convert to grayscale
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    # Resize to make characters clearer
+    scale_factor = 2.5
+    resized = cv2.resize(gray, None, fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_CUBIC)
+
+    # Apply a slight Gaussian blur to reduce noise
+    blurred = cv2.GaussianBlur(resized, (5, 5), 0)
+
+    # Apply morphological operations to close gaps in characters
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    morphed = cv2.morphologyEx(blurred, cv2.MORPH_CLOSE, kernel)
+
+    # Adaptive thresholding for better contrast
+    binary = cv2.adaptiveThreshold(
+        morphed,
+        maxValue=255,
+        adaptiveMethod=cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        thresholdType=cv2.THRESH_BINARY_INV,
+        blockSize=31,
+        C=15
+    )
+
+    # Optional: dilate to strengthen character edges
+    dilated = cv2.dilate(binary, kernel, iterations=1)
+
+    return dilated
 
 
 # ------------------------------------------------------------------
@@ -56,12 +75,9 @@ class LicensePlateRecognitionSystem:
 
     def __init__(self,
                  db: DatabaseManager,
-                 vehicle_detector_weights: str | Path = "yolov8s.pt",
                  plate_detector_weights: str | Path = "best.pt",
-                 use_cuda: bool = True,
                  ocr_lang: str = "en"):
         self.db = db
-        self.car_detector = YOLOv8VehicleDetector(vehicle_detector_weights)
 
         plate_path = Path(plate_detector_weights)
         if not plate_path.exists():
@@ -69,9 +85,9 @@ class LicensePlateRecognitionSystem:
                 f"Plate‑detector weights '{plate_path}' not found. "
                 "Place 'best.pt' in the project root or pass its path "
                 "to LicensePlateRecognitionSystem(..., plate_detector_weights='path').")
+        
         self.plate_detector = YOLO(str(plate_path))
-
-        self.ocr = PaddleOCR(lang=ocr_lang, use_angle_cls=False)
+        self.ocr = PaddleOCR(lang=ocr_lang, use_angle_cls=False, device="gpu")
 
     # --------------------------------------------------------------
     def process_frame(self, frame: np.ndarray) -> List[Dict]:
@@ -92,31 +108,36 @@ class LicensePlateRecognitionSystem:
             if crop.size == 0:
                 continue
 
+            cv2.imwrite(f"plates/plate_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.png", crop)
             # Preprocess the cropped plate region (e.g., binarization)
             pre = preprocess_plate(crop)
+            cv2.imwrite(f"plates/preprocessed_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.png", pre)
             # Ensure a 3-channel BGR image for PaddleOCR
             if pre.ndim == 2:
                 pre = cv2.cvtColor(pre, cv2.COLOR_GRAY2BGR)
             elif pre.ndim == 3 and pre.shape[2] == 1:
                 pre = cv2.cvtColor(pre, cv2.COLOR_GRAY2BGR)
 
+            cv2.imwrite(f"plates/ocr_input_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.png", pre)
+
             # Perform OCR on the preprocessed image
             rec_results = self.ocr.ocr(pre)
             text = ""
             conf = 0.0
-            if rec_results:
-                first = rec_results[0]
-                # PaddleOCR v3+ returns dicts; older versions return [bbox, [text, conf]]
-                if isinstance(first, dict):
-                    text = first.get('text', '')
-                    conf = first.get('confidence', 0.0)
-                elif isinstance(first, (list, tuple)) and len(first) >= 2 and isinstance(first[1], (list, tuple)):
-                    text, conf = first[1]
-                # normalize text
-                text = (text or "").upper().replace(" ", "")
+            if rec_results and isinstance(rec_results[0], dict):
+                res = rec_results[0]
+                texts = res.get("rec_texts", [])
+                scores = res.get("rec_scores", [])
+                if texts and scores:
+                    text = texts[0].upper().replace(" ", "")
+                    conf = scores[0]
+            else:
+                print("[!] Unexpected OCR result format:", rec_results)
+
 
             # Lookup plate owner and determine authorization
             # If db is a dict, use get; otherwise, call lookup method
+            print("Numarul de inmatriculare al masinii este: ", text)
             if isinstance(self.db, dict):
                 owner = self.db.get(text)
             else:
