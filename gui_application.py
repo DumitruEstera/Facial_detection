@@ -14,10 +14,8 @@ from license_plate_recognition_system import LicensePlateRecognitionSystem
 try:
     from deepface import DeepFace
     DEEPFACE_AVAILABLE = True
-    print("✅ DeepFace loaded successfully")
 except ImportError:
     DEEPFACE_AVAILABLE = False
-    print("❌ DeepFace not available. Install with: pip install deepface")
 
 class FaceDemographicsAnalyzer:
     """Class to handle face demographics analysis using DeepFace"""
@@ -26,22 +24,8 @@ class FaceDemographicsAnalyzer:
         self.enabled = DEEPFACE_AVAILABLE
         self.last_analysis_cache = {}  # Cache to avoid duplicate processing
         self.cache_duration = 3.0  # Analyze same face only once per 3 seconds
-        self.debug_mode = True  # Enable debug output
-        
-        if self.enabled:
-            print("🧠 DeepFace Demographics Analyzer initialized successfully")
-            # Test DeepFace is working
-            try:
-                print("🔍 Testing DeepFace functionality...")
-                # Create a small test image
-                test_img = np.ones((100, 100, 3), dtype=np.uint8) * 128
-                DeepFace.analyze(test_img, actions=['age'], enforce_detection=False, silent=True)
-                print("✅ DeepFace test successful")
-            except Exception as e:
-                print(f"⚠️ DeepFace test failed: {e}")
-        else:
-            print("❌ DeepFace not available - demographics analysis disabled")
-        
+        self.debug_mode = False  # Enable debug output
+
     def analyze_face(self, face_image: np.ndarray, face_bbox: tuple) -> dict:
         """
         Analyze face for emotion, age, and gender
@@ -52,16 +36,8 @@ class FaceDemographicsAnalyzer:
             
         Returns:
             Dict with emotion, age, gender info or empty dict
-        """
-        if not self.enabled:
-            if self.debug_mode:
-                print("⚠️ DeepFace not enabled, skipping analysis")
-            return {}
-            
+        """ 
         try:
-            if self.debug_mode:
-                print(f"🔍 Starting demographics analysis for face at {face_bbox}")
-                
             # Create cache key based on face position and current time
             x, y, w, h = face_bbox
             cache_key = f"{x}_{y}_{w}_{h}"
@@ -71,8 +47,6 @@ class FaceDemographicsAnalyzer:
             if cache_key in self.last_analysis_cache:
                 last_time, last_result = self.last_analysis_cache[cache_key]
                 if current_time - last_time < self.cache_duration:
-                    if self.debug_mode:
-                        print(f"📋 Using cached result for face at {face_bbox}")
                     return last_result
             
             # Ensure image is in the right format for DeepFace
@@ -89,12 +63,7 @@ class FaceDemographicsAnalyzer:
                 new_width = int(width * scale)
                 new_height = int(height * scale)
                 face_rgb = cv2.resize(face_rgb, (new_width, new_height))
-                if self.debug_mode:
-                    print(f"📏 Resized face from {width}x{height} to {new_width}x{new_height}")
-            
-            if self.debug_mode:
-                print("🧠 Running DeepFace analysis...")
-                
+
             # Run DeepFace analysis
             analysis = DeepFace.analyze(
                 img_path=face_rgb,
@@ -103,9 +72,7 @@ class FaceDemographicsAnalyzer:
                 silent=True  # Suppress verbose output
             )
             
-            if self.debug_mode:
-                print(f"📊 DeepFace analysis completed: {type(analysis)}")
-                
+
             # DeepFace returns a list, get first result
             if isinstance(analysis, list) and len(analysis) > 0:
                 result = analysis[0]
@@ -120,10 +87,7 @@ class FaceDemographicsAnalyzer:
                 'gender_confidence': result.get('gender', {}).get(result.get('dominant_gender', ''), 0),
                 'emotion_confidence': result.get('emotion', {}).get(result.get('dominant_emotion', ''), 0)
             }
-            
-            if self.debug_mode:
-                print(f"✅ Demographics extracted: {demographics}")
-            
+
             # Cache the result
             self.last_analysis_cache[cache_key] = (current_time, demographics)
             
@@ -421,18 +385,14 @@ class IntegratedSecurityGUI:
         
     def start_camera(self):
         """Start the camera feed"""
-        print("📹 Starting camera...")
+
         if not self.is_running:
             self.cap = cv2.VideoCapture(0)
             if self.cap.isOpened():
                 self.is_running = True
                 self.start_btn.config(state=tk.DISABLED)
                 self.stop_btn.config(state=tk.NORMAL)
-                
-                print("✅ Camera opened successfully")
-                print(f"🧠 Demographics analysis: {'ENABLED' if self.analyze_demographics.get() else 'DISABLED'}")
-                print(f"🔬 Test mode: {'ENABLED' if self.demographics_test_mode.get() else 'DISABLED'}")
-                
+
                 # Start video processing thread
                 self.video_thread = threading.Thread(target=self.process_video)
                 self.video_thread.daemon = True
@@ -442,23 +402,20 @@ class IntegratedSecurityGUI:
                 self.update_display()
             else:
                 messagebox.showerror("Error", "Could not open camera")
-                print("❌ Failed to open camera")
-        else:
-            print("⚠️ Camera already running")
-                
+
+
     def stop_camera(self):
         """Stop the camera feed"""
-        print("🛑 Stopping camera...")
+
         self.is_running = False
         if self.cap:
             self.cap.release()
         self.start_btn.config(state=tk.NORMAL)
         self.stop_btn.config(state=tk.DISABLED)
-        print("✅ Camera stopped")
-        
+
     def process_video(self):
         """Enhanced video processing with demographics analysis"""
-        print("🎥 Video processing thread started")
+
         frame_count = 0
         
         while self.is_running:
@@ -470,11 +427,8 @@ class IntegratedSecurityGUI:
                     face_results = []
                     plate_results = []
                     annotated_frame = frame.copy()
-                    
-                    # Debug every 30 frames (about once per second at 30fps)
-                    if frame_count % 30 == 0:
-                        print(f"🎥 Processing frame {frame_count}, mode: {mode}")
-                    
+                
+
                     # Process based on mode
                     if mode in ['face', 'both']:
                         # Get the basic face recognition results
@@ -482,10 +436,6 @@ class IntegratedSecurityGUI:
                         
                         # ENHANCED: Also detect faces that weren't recognized and add them as "Unknown"
                         all_faces = self.face_system.face_detector.detect_faces(frame)
-                        
-                        if frame_count % 30 == 0:
-                            print(f"🔍 Total faces detected: {len(all_faces)}")
-                            print(f"🔍 Recognized faces: {len(face_results)}")
                         
                         # For any face that wasn't recognized, add it as "Unknown"
                         recognized_bboxes = [r.get('bbox') for r in face_results if 'bbox' in r]
@@ -510,17 +460,9 @@ class IntegratedSecurityGUI:
                                     'person_id': None
                                 }
                                 face_results.append(unknown_result)
-                                
-                                if frame_count % 30 == 0:
-                                    print(f"➕ Added unknown face at bbox: {face_bbox}")
-                        
-                        if frame_count % 30 == 0:
-                            print(f"🔍 Total face results (including unknown): {len(face_results)}")
-                        
+          
                         # Enhanced: Add demographics analysis
                         if self.analyze_demographics.get() and self.demographics_analyzer.enabled:
-                            if frame_count % 30 == 0:
-                                print("🧠 Running demographics analysis...")
                             face_results = self.enhance_face_results_with_demographics(frame, face_results)
                         
                         if mode == 'face':
@@ -543,14 +485,7 @@ class IntegratedSecurityGUI:
                                            block=False)
                     except queue.Full:
                         pass
-                else:
-                    print("❌ Failed to read frame from camera")
-            else:
-                print("❌ Camera not available")
-                break
-                        
-        print("🛑 Video processing thread stopped")
-    
+
     def _bbox_overlap(self, bbox1, bbox2):
         """Calculate overlap ratio between two bounding boxes"""
         x1, y1, w1, h1 = bbox1
@@ -619,11 +554,10 @@ class IntegratedSecurityGUI:
     def enhance_face_results_with_demographics(self, frame, face_results):
         """Add demographics analysis to face recognition results"""
         if not face_results:
-            print("🔍 No face results to enhance")
+
             return []
             
         enhanced_results = []
-        print(f"🔍 Processing {len(face_results)} face result(s) for demographics")
         
         for i, result in enumerate(face_results):
             # Copy the original result
@@ -636,20 +570,14 @@ class IntegratedSecurityGUI:
             # In test mode, analyze all faces; otherwise only unknown ones
             should_analyze = (self.demographics_test_mode.get() or is_unknown)
             
-            print(f"🔍 Face {i+1}: Name='{result.get('name', 'N/A')}', "
-                  f"Confidence={result.get('confidence', 'N/A')}, "
-                  f"Unknown={is_unknown}, ShouldAnalyze={should_analyze}")
-            
             if should_analyze and 'bbox' in result:
                 # Extract face from frame
                 x, y, w, h = result['bbox']
-                print(f"🖼️ Extracting face from bbox: {x}, {y}, {w}, {h}")
-                
+
                 face_crop = frame[y:y+h, x:x+w]
                 
                 if face_crop.size > 0:
-                    print(f"📏 Face crop size: {face_crop.shape}")
-                    
+
                     # Analyze demographics
                     demographics = self.demographics_analyzer.analyze_face(face_crop, result['bbox'])
                     
@@ -661,17 +589,8 @@ class IntegratedSecurityGUI:
                             'demographics_analyzed': True
                         })
                         
-                        # Print enhanced information
-                        face_type = "Known" if not is_unknown else "Unknown"
-                        print(f"🎯 {face_type} person detected:")
-                        print(f"   👤 Name: {result.get('name', 'Unknown')}")
-                        print(f"   📊 Age: {demographics.get('age', 'N/A')}")
-                        print(f"   🚻 Gender: {demographics.get('gender', 'unknown')}")
-                        print(f"   😊 Emotion: {demographics.get('emotion', 'unknown')}")
-                        print(f"   📍 Confidence: {result.get('confidence', 'N/A')}")
-                        print("-" * 50)
                     else:
-                        print("❌ Demographics analysis failed for this face")
+
                         # Analysis failed, add empty demographics
                         enhanced_result.update({
                             'age': 'N/A',
@@ -680,7 +599,7 @@ class IntegratedSecurityGUI:
                             'demographics_analyzed': False
                         })
                 else:
-                    print("❌ Face crop is empty!")
+
                     # Empty face crop
                     enhanced_result.update({
                         'age': 'N/A',
@@ -840,19 +759,7 @@ def main():
         'user': 'postgres',
         'password': 'admin'  # Change this
     }
-    
-    print("🔒 Starting Enhanced Security System...")
-    print("🧠 DeepFace integration for demographics analysis")
-    print("-" * 50)
-    print("📋 TESTING INSTRUCTIONS:")
-    print("1. Start the application")
-    print("2. Check '🧠 Analyze Demographics' checkbox")
-    print("3. Check '🔬 Test Mode' checkbox (to analyze ALL faces)")
-    print("4. Click 'Start Camera'")
-    print("5. Put your face in front of the camera")
-    print("6. Watch console output for demographics analysis")
-    print("-" * 50)
-    
+
     try:
         # Create GUI
         root = tk.Tk()
@@ -860,19 +767,13 @@ def main():
         
         # Handle window closing
         root.protocol("WM_DELETE_WINDOW", app.on_closing)
-        
-        print("✅ GUI initialized successfully")
-        print("🎯 Ready to start! Click 'Start Camera' to begin testing")
-        
+
         # Start GUI
         root.mainloop()
         
     except Exception as e:
-        print(f"❌ Error starting application: {e}")
+
         import traceback
-        print(f"🔍 Full traceback: {traceback.format_exc()}")
-    
-    print("👋 Application closed")
 
 
 if __name__ == "__main__":
