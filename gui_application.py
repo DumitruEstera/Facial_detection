@@ -412,8 +412,58 @@ class IntegratedSecurityGUI:
                         # Process based on mode
                         if mode in ['face', 'all']:
                             face_frame, face_results = self.face_system.process_frame(frame)
+                            
+                            # Analyze demographics for unknown faces
+                            if self.analyze_demographics.get():
+                                try:
+                                    # Get ALL detected faces
+                                    all_faces = self.face_system.face_detector.detect_faces(frame)
+                                    
+                                    # Get bounding boxes of recognized faces
+                                    recognized_bboxes = [result['bbox'] for result in face_results]
+                                    
+                                    # Find unknown faces (faces not in recognized list)
+                                    for face_bbox in all_faces:
+                                        # Check if this face is already recognized
+                                        is_recognized = False
+                                        for recognized_bbox in recognized_bboxes:
+                                            # Compare bounding boxes (same face if overlaps significantly)
+                                            if self._bboxes_overlap(face_bbox, recognized_bbox):
+                                                is_recognized = True
+                                                break
+                                        
+                                        # If face is unknown, analyze demographics
+                                        if not is_recognized:
+                                            x, y, w, h = face_bbox
+                                            face_region = frame[y:y+h, x:x+w]
+                                            
+                                            # Analyze demographics
+                                            demographics = self.demographics_analyzer.analyze_face(face_region, face_bbox)
+                                            
+                                            # Add unknown face with demographics to results
+                                            unknown_result = {
+                                                'name': 'Unknown',
+                                                'employee_id': '',
+                                                'department': '',
+                                                'confidence': 0.0,
+                                                'bbox': face_bbox,
+                                                'timestamp': datetime.now(),
+                                                'age': demographics.get('age', '') if demographics else '',
+                                                'gender': demographics.get('gender', '') if demographics else '',
+                                                'emotion': demographics.get('emotion', '') if demographics else ''
+                                            }
+                                            face_results.append(unknown_result)
+                                
+                                except Exception as e:
+                                    print(f"❌ Error analyzing demographics for unknown faces: {e}")
+                            
                             if mode == 'face':
                                 annotated_frame = face_frame
+                                # Draw demographics on the frame
+                                annotated_frame = self._draw_demographics_on_frame(annotated_frame, face_results)
+                            elif mode == 'all':
+                                # Draw demographics on the combined frame
+                                annotated_frame = self._draw_demographics_on_frame(annotated_frame, face_results)                                               
                                 
                         if mode in ['plate', 'all']:
                             plate_results = self.plate_system.process_frame(frame)
@@ -448,6 +498,123 @@ class IntegratedSecurityGUI:
                     
                     time.sleep(0.033)  # ~30 FPS
                     
+    def _bboxes_overlap(self, bbox1, bbox2, threshold=0.5):
+        """
+        Check if two bounding boxes overlap significantly
+        
+        Args:
+            bbox1: First bounding box (x, y, w, h)
+            bbox2: Second bounding box (x, y, w, h)
+            threshold: Overlap threshold (0.5 = 50% overlap)
+        
+        Returns:
+            True if boxes overlap more than threshold
+        """
+        x1, y1, w1, h1 = bbox1
+        x2, y2, w2, h2 = bbox2
+        
+        # Calculate overlap area
+        x_overlap = max(0, min(x1 + w1, x2 + w2) - max(x1, x2))
+        y_overlap = max(0, min(y1 + h1, y2 + h2) - max(y1, y2))
+        overlap_area = x_overlap * y_overlap
+        
+        # Calculate areas
+        area1 = w1 * h1
+        area2 = w2 * h2
+        
+        # Calculate IoU (Intersection over Union)
+        union_area = area1 + area2 - overlap_area
+        
+        if union_area == 0:
+            return False
+        
+        iou = overlap_area / union_area
+        return iou > threshold
+    
+
+    def _draw_demographics_on_frame(self, frame, face_results):
+        """
+        Draw demographics information on frame for unknown faces
+        
+        Args:
+            frame: Input frame
+            face_results: List of face recognition results with demographics
+            
+        Returns:
+            Frame with demographics drawn
+        """
+        output = frame.copy()
+        
+        for result in face_results:
+            # Only draw demographics for unknown faces
+            if result.get('name') == 'Unknown':
+                bbox = result.get('bbox')
+                if bbox:
+                    x, y, w, h = bbox
+                    
+                    # Get demographics
+                    age = result.get('age', '')
+                    gender = result.get('gender', '')
+                    emotion = result.get('emotion', '')
+                    
+                    # Prepare labels - only show if we have data
+                    labels = []
+                    if age:
+                        labels.append(f"Age: {age}")
+                    if gender:
+                        labels.append(f"Gender: {gender}")
+                    if emotion:
+                        labels.append(f"Emotion: {emotion}")
+                    
+                    if labels:
+                        # Draw background rectangle for text
+                        font = cv2.FONT_HERSHEY_SIMPLEX
+                        font_scale = 0.5
+                        font_thickness = 1
+                        padding = 5
+                        line_height = 20
+                        
+                        # Calculate background size
+                        max_width = 0
+                        for label in labels:
+                            (text_width, text_height), _ = cv2.getTextSize(
+                                label, font, font_scale, font_thickness
+                            )
+                            max_width = max(max_width, text_width)
+                        
+                        bg_height = len(labels) * line_height + padding * 2
+                        bg_width = max_width + padding * 2
+                        
+                        # Position below the face box
+                        text_x = x
+                        text_y = y + h + 5
+                        
+                        # Draw semi-transparent background
+                        overlay = output.copy()
+                        cv2.rectangle(
+                            overlay,
+                            (text_x, text_y),
+                            (text_x + bg_width, text_y + bg_height),
+                            (0, 0, 0),
+                            -1
+                        )
+                        cv2.addWeighted(overlay, 0.6, output, 0.4, 0, output)
+                        
+                        # Draw each label
+                        for i, label in enumerate(labels):
+                            y_offset = text_y + padding + (i + 1) * line_height - 5
+                            cv2.putText(
+                                output,
+                                label,
+                                (text_x + padding, y_offset),
+                                font,
+                                font_scale,
+                                (0, 255, 255),  # Yellow color
+                                font_thickness
+                            )
+        
+        return output
+
 
     def update_display(self):
         """Update the video display"""

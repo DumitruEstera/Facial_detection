@@ -9,13 +9,15 @@ psycopg2-binary>=2.9.0
 # Face recognition dependencies
 tensorflow>=2.13.0
 faiss-cpu>=1.7.4  # Use faiss-gpu if you have CUDA support
-keras-facenet>=0.0.6
+facenet-pytorch>=2.5.2  # ← ADD THIS LINE
+# keras-facenet>=0.0.6  # ← Remove or comment this out
 
 # License plate recognition dependencies
 ultralytics>=8.0.0  # YOLOv8
 easyocr>=1.7.0
 torch>=2.0.0  # Will be installed with ultralytics/easyocr
 torchvision>=0.15.0
+paddlepaddle>=2.5.0  # ← Also consider adding this for PaddleOCR
 
 # GUI dependencies (already included in Python standard library)
 # tkinter - comes with Python
