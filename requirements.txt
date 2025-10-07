@@ -1,39 +1,112 @@
-# Core dependencies
-opencv-python>=4.8.0
-numpy>=1.24.0
-Pillow>=10.0.0
+# ==============================================================================
+# SECURITY SYSTEM - Complete Requirements
+# GPU-Accelerated Version with CUDA 12.7 Support
+# Python 3.8-3.11 compatible
+# ==============================================================================
 
+# ------------------------------------------------------------------------------
+# Core Dependencies
+# ------------------------------------------------------------------------------
+opencv-python>=4.8.0
+numpy==1.26.4
+Pillow>=10.0.0
+typing-extensions==4.12.2
+
+# ------------------------------------------------------------------------------
 # Database
+# ------------------------------------------------------------------------------
 psycopg2-binary>=2.9.0
 
-# Face recognition dependencies
-tensorflow>=2.13.0
-faiss-cpu>=1.7.4  # Use faiss-gpu if you have CUDA support
-facenet-pytorch>=2.5.2  # ← ADD THIS LINE
-# keras-facenet>=0.0.6  # ← Remove or comment this out
+# ------------------------------------------------------------------------------
+# GPU-Accelerated Deep Learning
+# IMPORTANT: Install PyTorch separately with CUDA support:
+# pip install torch==2.2.2 torchvision==0.17.2 torchaudio==2.2.2 --index-url https://download.pytorch.org/whl/cu121
+# ------------------------------------------------------------------------------
+torch==2.2.2
+torchvision==0.17.2
+torchaudio==2.2.2
 
-# License plate recognition dependencies
-ultralytics>=8.0.0  # YOLOv8
+# TensorFlow with CUDA support (optional - not used in current implementation)
+tensorflow==2.15.0
+
+# ------------------------------------------------------------------------------
+# Face Recognition
+# ------------------------------------------------------------------------------
+facenet-pytorch==2.6.0
+faiss-cpu==1.7.4
+
+# ------------------------------------------------------------------------------
+# Object Detection & OCR
+# ------------------------------------------------------------------------------
+ultralytics>=8.0.0
 easyocr>=1.7.0
-torch>=2.0.0  # Will be installed with ultralytics/easyocr
-torchvision>=0.15.0
-paddlepaddle>=2.5.0  # ← Also consider adding this for PaddleOCR
 
-# GUI dependencies (already included in Python standard library)
-# tkinter - comes with Python
-
-# Optional dependencies for better performance
-# tensorflow-gpu>=2.13.0  # If you have NVIDIA GPU with CUDA
-# onnxruntime-gpu>=1.15.0  # For GPU acceleration of ONNX models
-
-# Development dependencies (optional)
-# pytest>=7.4.0
-# black>=23.0.0
-# flake8>=6.0.0
-
-
-# Web API dependencies
+# ------------------------------------------------------------------------------
+# Web API & Real-time Communication
+# ------------------------------------------------------------------------------
 fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
 python-multipart>=0.0.6
 websockets>=12.0
+pydantic>=2.0.0
+
+# ------------------------------------------------------------------------------
+# Optional: GPU Monitoring
+# ------------------------------------------------------------------------------
+pynvml>=11.5.0
+
+# ------------------------------------------------------------------------------
+# Additional Utilities (auto-installed with above packages)
+# ------------------------------------------------------------------------------
+# These are typically installed as dependencies, but listed for reference:
+# - pandas (for data processing)
+# - scipy (for scientific computing)
+# - matplotlib (for visualization)
+# - requests (for HTTP requests)
+
+# ==============================================================================
+# INSTALLATION INSTRUCTIONS
+# ==============================================================================
+#
+# 1. Create virtual environment:
+#    conda create -n security_system python=3.10
+#    conda activate security_system
+#
+# 2. Install PyTorch with CUDA 12.1 support (compatible with CUDA 12.7):
+#    pip install torch==2.2.2 torchvision==0.17.2 torchaudio==2.2.2 --index-url https://download.pytorch.org/whl/cu121
+#
+# 3. Install remaining packages:
+#    pip install -r requirements.txt
+#
+# 4. Verify GPU setup:
+#    python test_gpu.py
+#
+# ==============================================================================
+# PACKAGE VERSIONS VERIFIED ON
+# ==============================================================================
+# OS: Windows 11
+# Python: 3.10.x
+# CUDA: 12.7
+# GPU: NVIDIA GeForce RTX 4060 Laptop GPU
+# Date: October 2025
+#
+# ==============================================================================
+# TROUBLESHOOTING
+# ==============================================================================
+#
+# If installation fails:
+#
+# 1. typing-extensions conflicts:
+#    pip install --upgrade typing-extensions==4.12.2
+#
+# 2. PyTorch CUDA not detected:
+#    pip uninstall torch torchvision torchaudio
+#    pip install torch==2.2.2 torchvision==0.17.2 torchaudio==2.2.2 --index-url https://download.pytorch.org/whl/cu121
+#
+# 3. FAISS-GPU not available:
+#    Use faiss-cpu (included) - works well for small datasets
+#
+# 4. EasyOCR download issues:
+#    Models will auto-download on first run (~100MB)
+#
+# ==============================================================================
