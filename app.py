@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-Optimized FastAPI Backend for Security System
-With separate threads for video capture, face recognition, and license plate recognition
+Fixed FastAPI Backend for Security System
+Key fixes:
+1. Better queue coordination - frames only added to raw queue if successfully queued for processing
+2. Smarter merging logic - uses partial results if available
+3. Increased timeout for result matching
 """
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
@@ -43,11 +46,6 @@ class LicensePlateRegistration(BaseModel):
     is_authorized: bool = True
     notes: Optional[str] = None
 
-class SystemConfig(BaseModel):
-    recognition_threshold: Optional[float] = None
-    min_confidence: Optional[float] = None
-    camera_id: Optional[str] = None
-
 # Database configuration
 DB_CONFIG = {
     'host': 'localhost',
@@ -78,7 +76,7 @@ def convert_to_serializable(obj):
 
 class OptimizedSecuritySystemAPI:
     def __init__(self):
-        self.app = FastAPI(title="Security System API", version="2.0.0")
+        self.app = FastAPI(title="Security System API", version="2.0.1")
         self.setup_cors()
         self.setup_routes()
         
@@ -95,24 +93,19 @@ class OptimizedSecuritySystemAPI:
         self.current_mode = "both"
         
         # Multi-threaded queue system
-        self.raw_frame_queue = queue.Queue(maxsize=10)  # Raw frames from camera
-        self.face_processing_queue = queue.Queue(maxsize=10)  # Frames for face processing
-        self.plate_processing_queue = queue.Queue(maxsize=10)  # Frames for plate processing
-        self.face_results_queue = queue.Queue(maxsize=10)  # Face processing results
-        self.plate_results_queue = queue.Queue(maxsize=10)  # Plate processing results
-        self.processed_frame_queue = queue.Queue(maxsize=10)  # Final encoded frames
+        self.raw_frame_queue = queue.Queue(maxsize=10)
+        self.face_processing_queue = queue.Queue(maxsize=10)
+        self.plate_processing_queue = queue.Queue(maxsize=10)
+        self.face_results_queue = queue.Queue(maxsize=10)
+        self.plate_results_queue = queue.Queue(maxsize=10)
+        self.processed_frame_queue = queue.Queue(maxsize=10)
         
         self.client_connections: List[WebSocket] = []
         
         # Frame management
-        self.frame_skip = 1  # Process every frame (adjust if needed)
+        self.frame_skip = 1
         self.frame_counter = 0
-        self.frame_id = 0  # To track frame synchronization
-        
-        # Thread synchronization
-        self.processing_lock = threading.Lock()
-        self.result_cache = {}  # Cache results by frame_id
-        self.cache_timeout = 1.0  # seconds
+        self.frame_id = 0
         
         # Statistics
         self.stats = {
@@ -120,7 +113,8 @@ class OptimizedSecuritySystemAPI:
             'frames_processed': 0,
             'face_detections': 0,
             'plate_detections': 0,
-            'frames_dropped': 0
+            'frames_dropped': 0,
+            'queue_skips': 0
         }
         
         # Start background tasks
@@ -141,7 +135,7 @@ class OptimizedSecuritySystemAPI:
         
         @self.app.get("/")
         async def root():
-            return {"message": "Security System API v2.0", "status": "online"}
+            return {"message": "Security System API v2.0.1 (Fixed)", "status": "online"}
         
         @self.app.get("/api/status")
         async def get_status():
@@ -157,7 +151,8 @@ class OptimizedSecuritySystemAPI:
                     "frames_processed": self.stats['frames_processed'],
                     "face_detections": self.stats['face_detections'],
                     "plate_detections": self.stats['plate_detections'],
-                    "frames_dropped": self.stats['frames_dropped']
+                    "frames_dropped": self.stats['frames_dropped'],
+                    "queue_skips": self.stats['queue_skips']
                 }
             }
         
@@ -167,7 +162,6 @@ class OptimizedSecuritySystemAPI:
                 if not self.is_streaming:
                     self.video_capture = cv2.VideoCapture(camera_id)
                     if self.video_capture.isOpened():
-                        # Set camera properties for better performance
                         self.video_capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
                         self.video_capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
                         self.video_capture.set(cv2.CAP_PROP_FPS, 30)
@@ -191,7 +185,6 @@ class OptimizedSecuritySystemAPI:
                     self.is_streaming = False
                     if self.video_capture:
                         self.video_capture.release()
-                    # Clear all queues
                     self._clear_all_queues()
                     logger.info("🛑 Camera stopped")
                     return {"status": "success", "message": "Camera stopped"}
@@ -268,7 +261,6 @@ class OptimizedSecuritySystemAPI:
             try:
                 while True:
                     try:
-                        # Get processed frame from queue (non-blocking)
                         message = self.processed_frame_queue.get(block=False)
                         await websocket.send_text(json.dumps(message))
                     except queue.Empty:
@@ -277,7 +269,6 @@ class OptimizedSecuritySystemAPI:
                         logger.error(f"❌ Error sending WebSocket message: {e}")
                         break
                     
-                    # Small delay to prevent CPU spinning
                     await asyncio.sleep(0.03)  # ~30 FPS
                     
             except WebSocketDisconnect:
@@ -292,10 +283,10 @@ class OptimizedSecuritySystemAPI:
     def setup_background_tasks(self):
         """Setup optimized multi-threaded processing pipeline"""
         
-        # Thread 1: Video Capture
+        # Thread 1: Video Capture - FIXED VERSION
         def capture_thread():
-            """Capture frames from camera and distribute to processing queues"""
-            logger.info("🎥 Thread 1: Video Capture started")
+            """Capture frames and ensure they're queued for processing before adding to raw queue"""
+            logger.info("🎥 Thread 1: Video Capture started (FIXED)")
             
             while True:
                 try:
@@ -313,24 +304,40 @@ class OptimizedSecuritySystemAPI:
                             
                             mode = self.current_mode
                             
-                            # Add frame to raw queue for display
-                            try:
-                                self.raw_frame_queue.put((current_frame_id, frame.copy()), block=False)
-                            except queue.Full:
-                                self.stats['frames_dropped'] += 1
+                            # FIX: Track if frame was successfully queued for processing
+                            queued_for_face = False
+                            queued_for_plate = False
                             
-                            # Distribute to processing queues based on mode
+                            # Try to queue for face processing
                             if mode in ["face", "both"]:
                                 try:
                                     self.face_processing_queue.put((current_frame_id, frame.copy()), block=False)
+                                    queued_for_face = True
                                 except queue.Full:
-                                    pass  # Skip if queue is full
+                                    self.stats['queue_skips'] += 1
+                            else:
+                                queued_for_face = True  # Not needed for this mode
                             
+                            # Try to queue for plate processing
                             if mode in ["plate", "both"]:
                                 try:
                                     self.plate_processing_queue.put((current_frame_id, frame.copy()), block=False)
+                                    queued_for_plate = True
                                 except queue.Full:
-                                    pass  # Skip if queue is full
+                                    self.stats['queue_skips'] += 1
+                            else:
+                                queued_for_plate = True  # Not needed for this mode
+                            
+                            # FIX: Only add to raw queue if successfully queued for processing
+                            # OR if queues don't need processing for current mode
+                            if queued_for_face and queued_for_plate:
+                                try:
+                                    self.raw_frame_queue.put((current_frame_id, frame.copy()), block=False)
+                                except queue.Full:
+                                    self.stats['frames_dropped'] += 1
+                            else:
+                                # Frame couldn't be queued properly, skip it
+                                self.stats['frames_dropped'] += 1
                         else:
                             logger.warning("⚠️ Failed to read frame from camera")
                             time.sleep(0.1)
@@ -348,10 +355,8 @@ class OptimizedSecuritySystemAPI:
             
             while True:
                 try:
-                    # Get frame from face processing queue
                     frame_id, frame = self.face_processing_queue.get(timeout=1.0)
                     
-                    # Process face recognition
                     start_time = time.time()
                     processed_frame, face_results = self._process_faces(frame)
                     processing_time = time.time() - start_time
@@ -360,11 +365,9 @@ class OptimizedSecuritySystemAPI:
                         self.stats['face_detections'] += len(face_results)
                         logger.debug(f"👤 Detected {len(face_results)} faces in {processing_time:.3f}s")
                     
-                    # Store results in queue
                     try:
                         self.face_results_queue.put((frame_id, processed_frame, face_results), block=False)
                     except queue.Full:
-                        # Remove oldest result and add new one
                         try:
                             self.face_results_queue.get(block=False)
                             self.face_results_queue.put((frame_id, processed_frame, face_results), block=False)
@@ -384,10 +387,8 @@ class OptimizedSecuritySystemAPI:
             
             while True:
                 try:
-                    # Get frame from plate processing queue
                     frame_id, frame = self.plate_processing_queue.get(timeout=1.0)
                     
-                    # Process license plate recognition
                     start_time = time.time()
                     plate_results = self._process_plates(frame)
                     processing_time = time.time() - start_time
@@ -396,11 +397,9 @@ class OptimizedSecuritySystemAPI:
                         self.stats['plate_detections'] += len(plate_results)
                         logger.debug(f"🚗 Detected {len(plate_results)} plates in {processing_time:.3f}s")
                     
-                    # Store results in queue
                     try:
                         self.plate_results_queue.put((frame_id, plate_results), block=False)
                     except queue.Full:
-                        # Remove oldest result and add new one
                         try:
                             self.plate_results_queue.get(block=False)
                             self.plate_results_queue.put((frame_id, plate_results), block=False)
@@ -413,16 +412,15 @@ class OptimizedSecuritySystemAPI:
                     logger.error(f"❌ Error in plate processing thread: {e}")
                     time.sleep(0.1)
         
-        # Thread 4: Results Merging and Frame Encoding
+        # Thread 4: Results Merging and Frame Encoding - IMPROVED VERSION
         def merging_thread():
-            """Merge results from face and plate processing, draw on frame, and encode"""
-            logger.info("🔄 Thread 4: Results Merging started")
+            """Merge results from face and plate processing"""
+            logger.info("🔄 Thread 4: Results Merging started (IMPROVED)")
             
-            # Cache for results waiting to be merged
             pending_results = {
-                'frames': {},  # frame_id -> frame
-                'face': {},    # frame_id -> (processed_frame, face_results)
-                'plate': {}    # frame_id -> plate_results
+                'frames': {},
+                'face': {},
+                'plate': {}
             }
             
             while True:
@@ -455,23 +453,26 @@ class OptimizedSecuritySystemAPI:
                         except queue.Empty:
                             pass
                     
-                    # Process frames that have all required results
+                    # Process frames - IMPROVED LOGIC
                     frames_to_process = list(pending_results['frames'].keys())
                     
                     for frame_id in frames_to_process:
-                        # Check if we have all required results for this frame
-                        has_all_results = True
+                        # FIX: More flexible matching - use partial results if available
+                        # Increased timeout to 60 frames (~2 seconds at 30fps)
+                        should_process = False
+                        use_timeout = self._is_frame_too_old(frame_id, max_age=60)
                         
                         if mode == "face":
-                            has_all_results = frame_id in pending_results['face']
+                            should_process = frame_id in pending_results['face'] or use_timeout
                         elif mode == "plate":
-                            has_all_results = frame_id in pending_results['plate']
+                            should_process = frame_id in pending_results['plate'] or use_timeout
                         elif mode == "both":
-                            has_all_results = (frame_id in pending_results['face'] and 
-                                             frame_id in pending_results['plate'])
+                            # FIX: Process if we have EITHER result, not just both
+                            has_face = frame_id in pending_results['face']
+                            has_plate = frame_id in pending_results['plate']
+                            should_process = (has_face or has_plate) or use_timeout
                         
-                        if has_all_results or self._is_frame_too_old(frame_id):
-                            # Merge results and create final frame
+                        if should_process:
                             frame = pending_results['frames'].pop(frame_id)
                             
                             face_results = []
@@ -481,29 +482,24 @@ class OptimizedSecuritySystemAPI:
                             # Get face results if available
                             if frame_id in pending_results['face']:
                                 processed_frame, face_results = pending_results['face'].pop(frame_id)
-                                if mode == "face":
-                                    final_frame = processed_frame
-                                elif mode == "both":
-                                    final_frame = processed_frame
+                                # Always use processed frame if available (has face labels)
+                                final_frame = processed_frame
                             
                             # Get plate results and draw if available
                             if frame_id in pending_results['plate']:
                                 plate_results = pending_results['plate'].pop(frame_id)
                                 if plate_results:
-                                    if mode == "plate":
-                                        final_frame = self.plate_system.draw_outputs(frame.copy(), plate_results)
-                                    elif mode == "both":
-                                        final_frame = self.plate_system.draw_outputs(final_frame, plate_results)
+                                    # Draw plates on top of face-annotated frame
+                                    final_frame = self.plate_system.draw_outputs(final_frame, plate_results)
                             
                             # Encode and queue for sending
                             self._encode_and_queue_frame(final_frame, face_results, plate_results)
                             self.stats['frames_processed'] += 1
                     
-                    # Clean up old cached results (older than 2 seconds)
+                    # Clean up old cached results
                     current_frame_id = self.frame_id
-                    self._cleanup_old_results(pending_results, current_frame_id, max_age=60)
+                    self._cleanup_old_results(pending_results, current_frame_id, max_age=90)
                     
-                    # Small delay
                     time.sleep(0.01)
                     
                 except Exception as e:
@@ -538,12 +534,12 @@ class OptimizedSecuritySystemAPI:
             logger.error(f"Plate processing error: {e}")
             return []
     
-    def _is_frame_too_old(self, frame_id: int, max_age: int = 30) -> bool:
+    def _is_frame_too_old(self, frame_id: int, max_age: int = 60) -> bool:
         """Check if frame is too old to wait for results"""
         current_frame_id = self.frame_id
         return (current_frame_id - frame_id) > max_age
     
-    def _cleanup_old_results(self, pending_results: Dict, current_frame_id: int, max_age: int = 60):
+    def _cleanup_old_results(self, pending_results: Dict, current_frame_id: int, max_age: int = 90):
         """Remove old cached results"""
         for result_type in ['frames', 'face', 'plate']:
             old_frame_ids = [fid for fid in pending_results[result_type].keys() 
@@ -554,7 +550,6 @@ class OptimizedSecuritySystemAPI:
     def _encode_and_queue_frame(self, frame, face_results, plate_results):
         """Encode frame to JPEG and add to output queue"""
         try:
-            # Resize frame for faster encoding and transmission
             height, width = frame.shape[:2]
             if width > 800:
                 scale = 800 / width
@@ -562,12 +557,10 @@ class OptimizedSecuritySystemAPI:
                 new_height = int(height * scale)
                 frame = cv2.resize(frame, (new_width, new_height))
             
-            # Encode with good quality
             encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 75]
             _, buffer = cv2.imencode('.jpg', frame, encode_param)
             frame_base64 = base64.b64encode(buffer).decode('utf-8')
             
-            # Prepare message
             message = {
                 "type": "video_frame",
                 "frame": frame_base64,
@@ -576,11 +569,9 @@ class OptimizedSecuritySystemAPI:
                 "timestamp": datetime.now().isoformat()
             }
             
-            # Add to queue (drop old frames if full)
             try:
                 self.processed_frame_queue.put(message, block=False)
             except queue.Full:
-                # Remove oldest frame and add new one
                 try:
                     self.processed_frame_queue.get(block=False)
                     self.processed_frame_queue.put(message, block=False)
@@ -615,15 +606,15 @@ app = security_api.app
 
 if __name__ == "__main__":
     import uvicorn
-    logger.info("🔒 Starting Optimized Security System API v2.0...")
+    logger.info("🔒 Starting Fixed Security System API v2.0.1...")
     logger.info("📡 API: http://localhost:8000")
     logger.info("🔌 WebSocket: ws://localhost:8000/ws")
     logger.info("📚 Docs: http://localhost:8000/docs")
     logger.info("🧵 Multi-threaded processing: 4 threads")
-    logger.info("   - Thread 1: Video Capture")
+    logger.info("   - Thread 1: Video Capture (FIXED)")
     logger.info("   - Thread 2: Facial Recognition")
     logger.info("   - Thread 3: License Plate Recognition")
-    logger.info("   - Thread 4: Results Merging & Encoding")
+    logger.info("   - Thread 4: Results Merging (IMPROVED)")
     
     try:
         uvicorn.run(

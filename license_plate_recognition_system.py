@@ -1,26 +1,16 @@
-# License‑Plate Recognition System — **Kaggle best.pt edition**
-# ================================================================
-# This version swaps in the YOLOv8 licence‑plate detector you downloaded
-# from Kaggle (harshitsingh09/yolov8-license-plate-detector).  After
-# unzipping, you should have a weight file called **best.pt**.  Place
-# that file in the project root (or pass another path when instantiating
-# the class) and you’re good to go.
-#
-# → Runtime deps (if missing)
-#     pip install ultralytics paddleocr opencv-python-headless numpy
-#
-# --------------------------------------------------------------------
+# License Plate Recognition System — EasyOCR Edition (More Stable!)
+# GPU-Enabled with EasyOCR instead of PaddleOCR
 from __future__ import annotations
 
 import cv2
 import numpy as np
+import torch
+import easyocr
 from pathlib import Path
 from typing import Dict, List, Tuple
-
-from ultralytics import YOLO            # YOLOv8 engine
-from paddleocr import PaddleOCR         # PP‑LPR recogniser
 from datetime import datetime
 
+from ultralytics import YOLO
 from database_manager import DatabaseManager
 
 # ------------------------------------------------------------------
@@ -36,73 +26,101 @@ def expand_bbox(bbox: Tuple[int, int, int, int], pad_ratio: float,
             min(w, x2 + pad_x), min(h, y2 + pad_y))
 
 def preprocess_plate(img: np.ndarray) -> np.ndarray:
+    """Enhanced preprocessing for license plate OCR"""
     # Convert to grayscale
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    if len(img.shape) == 3:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = img.copy()
 
     # Resize to make characters clearer
-    scale_factor = 2.5
-    resized = cv2.resize(gray, None, fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_CUBIC)
-
-    # Apply a slight Gaussian blur to reduce noise
-    blurred = cv2.GaussianBlur(resized, (5, 5), 0)
-
-    # Apply morphological operations to close gaps in characters
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    morphed = cv2.morphologyEx(blurred, cv2.MORPH_CLOSE, kernel)
-
-    # Adaptive thresholding for better contrast
-    binary = cv2.adaptiveThreshold(
-        morphed,
-        maxValue=255,
-        adaptiveMethod=cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        thresholdType=cv2.THRESH_BINARY_INV,
-        blockSize=31,
-        C=15
-    )
-
-    # Optional: dilate to strengthen character edges
-    dilated = cv2.dilate(binary, kernel, iterations=1)
-
-    return dilated
+    height, width = gray.shape
+    if width < 200:
+        scale_factor = 200 / width
+        new_width = int(width * scale_factor)
+        new_height = int(height * scale_factor)
+        gray = cv2.resize(gray, (new_width, new_height), interpolation=cv2.INTER_CUBIC)
+    
+    # Apply CLAHE for better contrast
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+    
+    # Denoise
+    denoised = cv2.fastNlMeansDenoising(enhanced, h=30)
+    
+    # Apply threshold
+    _, binary = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    # Morphological operations
+    kernel = np.ones((2, 2), np.uint8)
+    cleaned = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+    
+    return cleaned
 
 
 # ------------------------------------------------------------------
 # Main class
 # ------------------------------------------------------------------
 class LicensePlateRecognitionSystem:
-    """Car → plate → OCR → DB lookup → overlay"""
+    """GPU-accelerated License Plate Recognition with EasyOCR"""
 
     def __init__(self,
                  db: DatabaseManager,
                  plate_detector_weights: str | Path = "best.pt",
-                 ocr_lang: str = "en"):
+                 ocr_lang: List[str] = ['en']):
         self.db = db
 
         self.db_manager = DatabaseManager(**self.db)
         self.db_manager.connect()
 
+        # Check GPU availability
+        use_gpu = torch.cuda.is_available()
+        device = "cuda" if use_gpu else "cpu"
+        
+        print(f"🎮 License Plate System using: {device}")
+        if use_gpu:
+            print(f"   GPU: {torch.cuda.get_device_name(0)}")
+
         plate_path = Path(plate_detector_weights)
         if not plate_path.exists():
             raise FileNotFoundError(
-                f"Plate‑detector weights '{plate_path}' not found. "
-                "Place 'best.pt' in the project root or pass its path "
-                "to LicensePlateRecognitionSystem(..., plate_detector_weights='path').")
+                f"Plate detector weights '{plate_path}' not found. "
+                "Place 'best.pt' in the project root.")
         
+        # Load YOLO on GPU
+        print(f"Loading YOLO plate detector from: {plate_path}")
         self.plate_detector = YOLO(str(plate_path))
-        self.ocr = PaddleOCR(lang=ocr_lang, use_angle_cls=False, device="gpu")
+        if use_gpu:
+            self.plate_detector.to('cuda')
+        
+        # Initialize EasyOCR with GPU support
+        print(f"Initializing EasyOCR (GPU: {use_gpu})...")
+        self.reader = easyocr.Reader(
+            ocr_lang,
+            gpu=use_gpu,
+            verbose=False
+        )
+        
+        print(f"✅ License plate system ready (GPU: {use_gpu})")
 
     # --------------------------------------------------------------
     def process_frame(self, frame: np.ndarray) -> List[Dict]:
         """
-        Detects license plates in the given frame, performs OCR, looks up owner,
-        and returns a list of result dicts containing bbox, plate text, confidence,
-        owner, and authorization status.
+        Detects license plates, performs OCR, looks up owner,
+        and returns detection results.
         """
         h, w = frame.shape[:2]
         outs = []
 
-        # Run plate detection
-        detection_results = self.plate_detector.predict(frame, imgsz=640, conf=0.25)[0].boxes
+        # Run plate detection (GPU-accelerated)
+        detection_results = self.plate_detector.predict(
+            frame, 
+            imgsz=640, 
+            conf=0.25,
+            device='cuda' if torch.cuda.is_available() else 'cpu',
+            verbose=False
+        )[0].boxes
+        
         for plate in detection_results:
             x1, y1, x2, y2 = map(int, plate.xyxy[0])
             x1, y1, x2, y2 = expand_bbox((x1, y1, x2, y2), 0.05, w, h)
@@ -110,41 +128,49 @@ class LicensePlateRecognitionSystem:
             if crop.size == 0:
                 continue
 
-            cv2.imwrite(f"plates/plate_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.png", crop)
-            # Preprocess the cropped plate region (e.g., binarization)
+            # Preprocess the cropped plate region
             pre = preprocess_plate(crop)
-            cv2.imwrite(f"plates/preprocessed_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.png", pre)
-            # Ensure a 3-channel BGR image for PaddleOCR
-            if pre.ndim == 2:
-                pre = cv2.cvtColor(pre, cv2.COLOR_GRAY2BGR)
-            elif pre.ndim == 3 and pre.shape[2] == 1:
-                pre = cv2.cvtColor(pre, cv2.COLOR_GRAY2BGR)
 
-            cv2.imwrite(f"plates/ocr_input_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.png", pre)
+            # Perform OCR with EasyOCR (GPU-accelerated)
+            try:
+                results = self.reader.readtext(pre)
+                
+                text = ""
+                conf = 0.0
+                
+                # Extract text and confidence from EasyOCR results
+                for (bbox, detected_text, confidence) in results:
+                    # Clean text
+                    cleaned_text = detected_text.upper().replace(" ", "")
+                    # Remove special characters except letters and numbers
+                    cleaned_text = ''.join(c for c in cleaned_text if c.isalnum())
+                    text += cleaned_text
+                    conf = max(conf, confidence)
+                
+                # If no text detected, try original image
+                if not text or conf < 0.5:
+                    results = self.reader.readtext(crop)
+                    for (bbox, detected_text, confidence) in results:
+                        cleaned_text = detected_text.upper().replace(" ", "")
+                        cleaned_text = ''.join(c for c in cleaned_text if c.isalnum())
+                        text += cleaned_text
+                        conf = max(conf, confidence)
+                
+            except Exception as e:
+                print(f"OCR error: {e}")
+                text = ""
+                conf = 0.0
 
-            # Perform OCR on the preprocessed image
-            rec_results = self.ocr.ocr(pre)
-            text = ""
-            conf = 0.0
-            if rec_results and isinstance(rec_results[0], dict):
-                res = rec_results[0]
-                texts = res.get("rec_texts", [])
-                scores = res.get("rec_scores", [])
-                if texts and scores:
-                    text = texts[0].upper().replace(" ", "")
-                    conf = scores[0]
-            else:
-                print("[!] Unexpected OCR result format:", rec_results)
-
+            # Clean up text
+            text = text.strip()
+            if text:
+                print(f"Detected plate: {text} (confidence: {conf:.2f})")
 
             # Lookup plate owner and determine authorization
-            # If db is a dict, use get; otherwise, call lookup method
-            print("Numarul de inmatriculare al masinii este: ", text)
-
             owner = "Unknown car"
             authorised = False
 
-            if conf > 0.80 and text:
+            if conf > 0.5 and text:  # Lower threshold for EasyOCR
                 owner_name = self.db_manager.lookup_owner_by_plate(text)
                 if owner_name:
                     owner = owner_name
@@ -157,10 +183,10 @@ class LicensePlateRecognitionSystem:
                 # GUI needs these ↓
                 "timestamp": ts,
                 "plate_number": plate_number,
-                "vehicle_type": None,          # fill in later if you have it
+                "vehicle_type": None,
                 "is_authorized": authorised,
 
-                # original fields (keep them if other code uses them)
+                # Original fields
                 "bbox": (x1, y1, x2, y2),
                 "plate": plate_number,
                 "confidence": float(conf),
@@ -174,12 +200,9 @@ class LicensePlateRecognitionSystem:
                        owner_name: str = None, owner_id: str = None,
                        is_authorized: bool = True, expiry_date: datetime = None,
                        notes: str = None) -> bool:
-        """
-        Register a new license plate in the database.
-        Returns True if successful, False if already exists or error occurred.
-        """
+        """Register a new license plate in the database."""
         try:
-            plate_id = self.db.add_license_plate(
+            plate_id = self.db_manager.add_license_plate(
                 plate_number=plate_number,
                 vehicle_type=vehicle_type,
                 owner_name=owner_name,
@@ -197,6 +220,7 @@ class LicensePlateRecognitionSystem:
     # --------------------------------------------------------------
     @staticmethod
     def draw_outputs(frame: np.ndarray, outs: List[Dict]) -> np.ndarray:
+        """Draw detection boxes and labels on frame"""
         for o in outs:
             x1, y1, x2, y2 = o["bbox"]
             colour = (0, 255, 0) if o["authorised"] else (0, 0, 255)
@@ -209,13 +233,19 @@ class LicensePlateRecognitionSystem:
 
 
 # ------------------------------------------------------------------
-# Quick demo (press Q to quit)
+# Quick demo (press Q to quit)
 # ------------------------------------------------------------------
 if __name__ == "__main__":
     cap = cv2.VideoCapture(0)
-    db = DatabaseManager("sqlite:///security.db")
-    lpr = LicensePlateRecognitionSystem(db)
+    db_config = {
+        'host': 'localhost',
+        'database': 'facial_recognition_db',
+        'user': 'postgres',
+        'password': 'admin'
+    }
+    lpr = LicensePlateRecognitionSystem(db_config)
 
+    print("Press 'q' to quit")
     while True:
         ret, frm = cap.read()
         if not ret:
