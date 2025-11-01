@@ -49,9 +49,9 @@ class LicensePlateRegistration(BaseModel):
 # Database configuration
 DB_CONFIG = {
     'host': 'localhost',
-    'database': 'facial_recognition_db',
+    'database': 'facial_recognition',
     'user': 'postgres',
-    'password': 'admin'
+    'password': 'incorect'
 }
 
 def convert_to_serializable(obj):

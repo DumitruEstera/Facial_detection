@@ -6,8 +6,8 @@ import pickle
 from datetime import datetime
 
 class DatabaseManager:
-    def __init__(self, host='localhost', database='facial_recognition_db', 
-                 user='postgres', password='admin'):
+    def __init__(self, host='localhost', database='facial_recognition', 
+                 user='postgres', password='incorect'):
         self.connection_params = {
             'host': host,
             'database': database,
