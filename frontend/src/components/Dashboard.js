@@ -1,6 +1,20 @@
 import React from 'react';
 
 const Dashboard = ({ videoFrame, systemStatus, recentLogs, onStartCamera, onStopCamera, onSetMode }) => {
+  // Helper function to format demographics display
+  const formatDemographics = (log) => {
+    if (log.name !== 'Unknown' || (!log.age && !log.gender && !log.emotion)) {
+      return null;
+    }
+    
+    const parts = [];
+    if (log.age) parts.push(`Age: ${log.age}`);
+    if (log.gender) parts.push(`${log.gender}`);
+    if (log.emotion) parts.push(`${log.emotion}`);
+    
+    return parts.length > 0 ? ` | ${parts.join(' | ')}` : '';
+  };
+
   return (
     <div className="dashboard">
       <div className="dashboard-grid">
@@ -52,6 +66,25 @@ const Dashboard = ({ videoFrame, systemStatus, recentLogs, onStartCamera, onStop
               ))}
             </div>
           </div>
+          
+          {/* Demographics toggle if available */}
+          {systemStatus.demographics_enabled !== undefined && (
+            <div className="demographics-toggle">
+              <label>
+                <input 
+                  type="checkbox" 
+                  checked={systemStatus.demographics_enabled}
+                  onChange={(e) => {
+                    // This would need to be passed as a prop from App.js
+                    if (window.toggleDemographics) {
+                      window.toggleDemographics(e.target.checked);
+                    }
+                  }}
+                />
+                <span> 🧠 Enable Demographics Analysis</span>
+              </label>
+            </div>
+          )}
         </div>
         
         <div className="info-section">
@@ -72,6 +105,14 @@ const Dashboard = ({ videoFrame, systemStatus, recentLogs, onStartCamera, onStop
                 <span>Connected Clients:</span>
                 <span>{systemStatus.connected_clients || 0}</span>
               </div>
+              {systemStatus.demographics_enabled !== undefined && (
+                <div className="status-item">
+                  <span>Demographics:</span>
+                  <span className={systemStatus.demographics_enabled ? 'status-active' : 'status-inactive'}>
+                    {systemStatus.demographics_enabled ? 'Enabled' : 'Disabled'}
+                  </span>
+                </div>
+              )}
             </div>
           </div>
           
@@ -85,10 +126,17 @@ const Dashboard = ({ videoFrame, systemStatus, recentLogs, onStartCamera, onStop
                   </div>
                   <div className="log-content">
                     {log.type === 'face' ? (
-                      <span>
-                        👤 {log.name || 'Unknown'} 
-                        {log.confidence && ` (${(log.confidence * 100).toFixed(1)}%)`}
-                      </span>
+                      <div>
+                        <span className={log.name === 'Unknown' ? 'unknown-person' : ''}>
+                          👤 {log.name || 'Unknown'} 
+                          {log.confidence && log.confidence > 0 && ` (${(log.confidence * 100).toFixed(1)}%)`}
+                        </span>
+                        {log.name === 'Unknown' && (
+                          <div className="demographics-info">
+                            {formatDemographics(log)}
+                          </div>
+                        )}
+                      </div>
                     ) : (
                       <span>
                         🚗 {log.plate || log.plate_number || 'Unknown'} 

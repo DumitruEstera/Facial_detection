@@ -1,0 +1,164 @@
+/* Additional CSS for Demographics Display */
+
+/* Demographics toggle in dashboard */
+.demographics-toggle {
+  margin-top: 1rem;
+  padding: 1rem;
+  background: rgba(102, 126, 234, 0.05);
+  border-radius: 10px;
+}
+
+.demographics-toggle label {
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  font-weight: 500;
+  color: #555;
+}
+
+.demographics-toggle input[type="checkbox"] {
+  margin-right: 0.5rem;
+}
+
+/* Demographics info in logs */
+.demographics-info {
+  font-size: 0.85rem;
+  color: #6b7280;
+  margin-top: 0.25rem;
+  font-style: italic;
+}
+
+.unknown-person {
+  color: #f59e0b;
+}
+
+.log-demographics {
+  font-size: 0.9rem;
+}
+
+.demographics-text {
+  color: #6b7280;
+  font-size: 0.85rem;
+}
+
+/* Status for unknown faces */
+.status-unknown {
+  background: rgba(245, 158, 11, 0.1);
+  color: #f59e0b;
+  padding: 0.25rem 0.75rem;
+  border-radius: 15px;
+  font-size: 0.9rem;
+  font-weight: 500;
+}
+
+/* Update table header for demographics column */
+.logs-table .table-header {
+  display: grid;
+  grid-template-columns: 150px 100px 1fr 200px 120px;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  font-weight: 600;
+  padding: 1rem;
+}
+
+.logs-table .table-row {
+  display: grid;
+  grid-template-columns: 150px 100px 1fr 200px 120px;
+  padding: 1rem;
+  border-bottom: 1px solid #f3f4f6;
+  align-items: center;
+}
+
+/* Highlight unknown faces with demographics */
+.log-item.face.has-demographics {
+  border-left-color: #f59e0b;
+  background: rgba(245, 158, 11, 0.05);
+}
+
+/* Performance stats for demographics */
+.performance-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1rem;
+  margin-top: 1rem;
+  padding: 1rem;
+  background: rgba(255, 255, 255, 0.5);
+  border-radius: 10px;
+}
+
+.performance-stat {
+  display: flex;
+  flex-direction: column;
+}
+
+.performance-stat-label {
+  font-size: 0.8rem;
+  color: #6b7280;
+  margin-bottom: 0.25rem;
+}
+
+.performance-stat-value {
+  font-size: 1.2rem;
+  font-weight: 600;
+  color: #333;
+}
+
+/* Animation for new demographics data */
+@keyframes demographicsUpdate {
+  0% {
+    background-color: rgba(102, 126, 234, 0.2);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+.demographics-updated {
+  animation: demographicsUpdate 1s ease-out;
+}
+
+/* Responsive adjustments */
+@media (max-width: 1200px) {
+  .logs-table .table-header,
+  .logs-table .table-row {
+    grid-template-columns: 120px 80px 1fr 150px 100px;
+  }
+}
+
+@media (max-width: 768px) {
+  .logs-table .table-header,
+  .logs-table .table-row {
+    grid-template-columns: 1fr;
+    gap: 0.5rem;
+  }
+  
+  .log-demographics {
+    padding-left: 1rem;
+    font-style: italic;
+  }
+}
+
+/* Loading indicator for demographics */
+.demographics-loading {
+  display: inline-block;
+  margin-left: 0.5rem;
+  font-size: 0.8rem;
+  color: #6b7280;
+}
+
+.demographics-loading::after {
+  content: '...';
+  animation: dots 1.5s steps(3, end) infinite;
+}
+
+@keyframes dots {
+  0%, 20% {
+    content: '.';
+  }
+  40% {
+    content: '..';
+  }
+  60%, 100% {
+    content: '...';
+  }
+}

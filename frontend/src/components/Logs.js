@@ -8,6 +8,18 @@ const Logs = ({ logs }) => {
     return log.type === filter;
   });
 
+  // Helper function to format demographics for display
+  const formatDemographics = (log) => {
+    if (!log || log.name !== 'Unknown') return '';
+    
+    const parts = [];
+    if (log.age) parts.push(`Age: ${log.age}`);
+    if (log.gender) parts.push(log.gender);
+    if (log.emotion) parts.push(log.emotion);
+    
+    return parts.join(', ');
+  };
+
   return (
     <div className="logs-section">
       <h2>📋 Activity Logs</h2>
@@ -40,6 +52,7 @@ const Logs = ({ logs }) => {
           <div>Time</div>
           <div>Type</div>
           <div>Details</div>
+          <div>Demographics</div>
           <div>Status</div>
         </div>
         
@@ -53,10 +66,10 @@ const Logs = ({ logs }) => {
             </div>
             <div className="log-details">
               {log.type === 'face' ? (
-                <span>
+                <span className={log.name === 'Unknown' ? 'unknown-person' : ''}>
                   <strong>{log.name || 'Unknown'}</strong>
                   {log.employee_id && ` (${log.employee_id})`}
-                  {log.confidence && (
+                  {log.confidence && log.confidence > 0 && (
                     <span className="confidence">
                       {(log.confidence * 100).toFixed(1)}%
                     </span>
@@ -70,9 +83,22 @@ const Logs = ({ logs }) => {
                 </span>
               )}
             </div>
+            <div className="log-demographics">
+              {log.type === 'face' ? (
+                <span className="demographics-text">
+                  {formatDemographics(log) || '-'}
+                </span>
+              ) : (
+                '-'
+              )}
+            </div>
             <div className="log-status">
               {log.type === 'face' ? (
-                <span className="status-recognized">Recognized</span>
+                log.name === 'Unknown' ? (
+                  <span className="status-unknown">Unknown</span>
+                ) : (
+                  <span className="status-recognized">Recognized</span>
+                )
               ) : (
                 <span className={log.authorised || log.is_authorized ? 'status-authorized' : 'status-unauthorized'}>
                   {(log.authorised || log.is_authorized) ? 'Authorized' : 'Unauthorized'}
