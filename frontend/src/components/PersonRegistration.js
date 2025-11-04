@@ -35,73 +35,80 @@ const PersonRegistration = ({ onRegister }) => {
   };
 
   return (
-    <div className="registration-form">
-      <h2>👤 Register New Person</h2>
-      
-      {message && (
-        <div className={`message ${message.type}`}>
-          {message.text}
-        </div>
-      )}
-      
-      <form onSubmit={handleSubmit}>
-        <div className="form-group">
-          <label htmlFor="name">Full Name *</label>
-          <input
-            type="text"
-            id="name"
-            name="name"
-            value={formData.name}
-            onChange={handleInputChange}
-            required
-            placeholder="Enter full name"
-          />
+    <div className="modern-form-container">
+      <div className="modern-form-card">
+        <div className="form-header">
+          <h2>👤 Register New Person</h2>
+          <p>Add a new person to the facial recognition system</p>
         </div>
         
-        <div className="form-group">
-          <label htmlFor="employee_id">Employee ID *</label>
-          <input
-            type="text"
-            id="employee_id"
-            name="employee_id"
-            value={formData.employee_id}
-            onChange={handleInputChange}
-            required
-            placeholder="Enter employee ID"
-          />
-        </div>
+        {message && (
+          <div className={`modern-message ${message.type}`}>
+            {message.type === 'success' ? '✅' : '❌'} {message.text}
+          </div>
+        )}
         
-        <div className="form-group">
-          <label htmlFor="department">Department</label>
-          <input
-            type="text"
-            id="department"
-            name="department"
-            value={formData.department}
-            onChange={handleInputChange}
-            placeholder="Enter department"
-          />
-        </div>
+        <form onSubmit={handleSubmit} className="modern-form">
+          <div className="form-group">
+            <label htmlFor="name">Full Name *</label>
+            <input
+              type="text"
+              id="name"
+              name="name"
+              value={formData.name}
+              onChange={handleInputChange}
+              required
+              placeholder="Enter full name"
+            />
+          </div>
+          
+          <div className="form-group">
+            <label htmlFor="employee_id">Employee ID *</label>
+            <input
+              type="text"
+              id="employee_id"
+              name="employee_id"
+              value={formData.employee_id}
+              onChange={handleInputChange}
+              required
+              placeholder="Enter employee ID"
+            />
+          </div>
+          
+          <div className="form-group">
+            <label htmlFor="department">Department</label>
+            <input
+              type="text"
+              id="department"
+              name="department"
+              value={formData.department}
+              onChange={handleInputChange}
+              placeholder="Enter department"
+            />
+          </div>
+          
+          <button 
+            type="submit" 
+            disabled={isSubmitting || !formData.name || !formData.employee_id}
+            className="modern-submit-btn"
+          >
+            {isSubmitting ? '⏳ Registering...' : '✅ Register Person'}
+          </button>
+        </form>
         
-        <button 
-          type="submit" 
-          disabled={isSubmitting || !formData.name || !formData.employee_id}
-          className="btn btn-primary"
-        >
-          {isSubmitting ? '⏳ Registering...' : '✅ Register Person'}
-        </button>
-      </form>
-      
-      <div className="info-box">
-        <h3>ℹ️ Note</h3>
-        <p>
-          After registering a person's details, you'll need to capture their face images 
-          using the example_usage.py script in registration mode for the facial recognition 
-          to work properly.
-        </p>
-        <code>
-          python example_usage.py --mode register --name "John Doe" --employee-id "EMP001"
-        </code>
+        <div className="modern-info-box">
+          <div className="info-icon">ℹ️</div>
+          <div className="info-content">
+            <h3>Next Steps</h3>
+            <p>
+              After registering a person's details, capture their face images 
+              using the registration script for facial recognition to work properly.
+            </p>
+            <code>
+              python example_usage.py --mode register --name "John Doe" --employee-id "EMP001"
+            </code>
+          </div>
+        </div>
       </div>
     </div>
   );

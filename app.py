@@ -455,7 +455,7 @@ class EnhancedSecuritySystemAPI:
         @self.app.post("/api/camera/mode")
         async def set_mode(request: dict):
             mode = request.get("mode")
-            if mode not in ["face", "plate", "both"]:
+            if mode not in ["face", "plate", "both", "none"]:
                 raise HTTPException(status_code=400, detail="Invalid mode")
             self.current_mode = mode
             logger.info(f"🔄 Detection mode set to: {mode}")
@@ -615,8 +615,9 @@ class EnhancedSecuritySystemAPI:
                             else:
                                 queued_for_fire = True
                             
-                            # Only add to raw queue if successfully queued for processing
-                            if queued_for_face and queued_for_plate and queued_for_fire:
+                            # For 'none' mode, always add frame to raw queue (no detection needed)
+                            # For other modes, only add if successfully queued for processing
+                            if mode == "none" or (queued_for_face and queued_for_plate and queued_for_fire):
                                 try:
                                     self.raw_frame_queue.put((current_frame_id, frame.copy()), block=False)
                                 except queue.Full:
@@ -922,7 +923,10 @@ class EnhancedSecuritySystemAPI:
                         should_process = False
                         use_timeout = self._is_frame_too_old(frame_id, max_age=60)
                         
-                        if mode == "face":
+                        if mode == "none":
+                            # Process immediately - no detection needed
+                            should_process = True
+                        elif mode == "face":
                             should_process = frame_id in pending_results['face'] or use_timeout
                         elif mode == "plate":
                             should_process = frame_id in pending_results['plate'] or use_timeout

@@ -4,6 +4,8 @@ import './demographics_styles.css';  // Additional styles for demographics
 
 // Import components
 import Dashboard from './components/Dashboard';
+import ModernDashboard from './components/ModernDashboard';
+import ModernLayout from './components/ModernLayout';
 import PersonRegistration from './components/PersonRegistration';
 import PlateRegistration from './components/PlateRegistration';
 import Logs from './components/Logs';
@@ -307,64 +309,16 @@ function App() {
 
   return (
     <div className="App">
-      <header className="app-header">
-        <h1>🔒 Security System Dashboard</h1>
-        <div className="header-info">
-          <div className="status-indicator">
-            <span className={`status-dot ${isConnected ? 'connected' : 'disconnected'}`}></span>
-            <span>{isConnected ? 'Connected' : 'Disconnected'}</span>
-          </div>
-          {systemStatus.demographics_enabled !== undefined && (
-            <div className="demographics-indicator">
-              <span className={`status-dot ${systemStatus.demographics_enabled ? 'connected' : 'disconnected'}`}></span>
-              <span>🧠 Demographics: {systemStatus.demographics_enabled ? 'ON' : 'OFF'}</span>
-            </div>
-          )}
-          {systemStatus.fire_detection_enabled !== undefined && (
-            <div className="fire-indicator">
-              <span className={`status-dot ${systemStatus.fire_detection_enabled ? 'connected' : 'disconnected'}`}></span>
-              <span>🔥 Fire Detection: {systemStatus.fire_detection_enabled ? 'ON' : 'OFF'}</span>
-            </div>
-          )}
-        </div>
-      </header>
-
-      <nav className="navigation">
-        <button 
-          className={activeTab === 'dashboard' ? 'active' : ''}
-          onClick={() => setActiveTab('dashboard')}
-        >
-          📹 Dashboard
-        </button>
-        <button 
-          className={activeTab === 'person-reg' ? 'active' : ''}
-          onClick={() => setActiveTab('person-reg')}
-        >
-          👤 Register Person
-        </button>
-        <button 
-          className={activeTab === 'plate-reg' ? 'active' : ''}
-          onClick={() => setActiveTab('plate-reg')}
-        >
-          🚗 Register Plate
-        </button>
-        <button 
-          className={activeTab === 'logs' ? 'active' : ''}
-          onClick={() => setActiveTab('logs')}
-        >
-          📋 Logs
-        </button>
-        <button 
-          className={activeTab === 'stats' ? 'active' : ''}
-          onClick={() => setActiveTab('stats')}
-        >
-          📊 Statistics
-        </button>
-      </nav>
-
-      <main className="main-content">
+      <ModernLayout
+        activeTab={activeTab}
+        onNavigate={setActiveTab}
+        isConnected={isConnected}
+        systemStatus={systemStatus}
+        onStartCamera={startCamera}
+        onStopCamera={stopCamera}
+      >
         {activeTab === 'dashboard' && (
-          <Dashboard 
+          <ModernDashboard 
             videoFrame={videoFrame}
             systemStatus={systemStatus}
             recentLogs={recentLogs}
@@ -376,6 +330,7 @@ function App() {
             onToggleFireDetection={toggleFireDetection}
             demographicsEnabled={demographicsEnabled}
             fireDetectionEnabled={fireDetectionEnabled}
+            isConnected={isConnected}
           />
         )}
         {activeTab === 'person-reg' && (
@@ -408,7 +363,7 @@ function App() {
             )}
           </div>
         )}
-      </main>
+      </ModernLayout>
     </div>
   );
 }
