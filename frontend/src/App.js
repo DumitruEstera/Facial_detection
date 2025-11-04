@@ -21,6 +21,8 @@ function App() {
   const [recentLogs, setRecentLogs] = useState([]);
   const [ws, setWs] = useState(null);
   const [demographicsEnabled, setDemographicsEnabled] = useState(true);
+  const [fireDetectionEnabled, setFireDetectionEnabled] = useState(true);
+  const [fireAlerts, setFireAlerts] = useState([]);
 
   // WebSocket connection
   useEffect(() => {
@@ -68,6 +70,39 @@ function App() {
             });
           }
           
+          // Process fire detection results
+          if (data.fire_results && data.fire_results.length > 0) {
+            const criticalAlerts = data.fire_results.filter(r => r.severity === 'critical');
+            const highAlerts = data.fire_results.filter(r => r.severity === 'high');
+            
+            // Update fire alerts state
+            setFireAlerts(data.fire_results);
+            
+            // Add to logs
+            data.fire_results.forEach(result => {
+              newLogs.push({
+                type: 'fire',
+                timestamp: data.timestamp,
+                class: result.class,
+                confidence: result.confidence,
+                severity: result.severity,
+                alert: result.alert
+              });
+            });
+            
+            // Show browser notification for critical alerts
+            if (criticalAlerts.length > 0 && 'Notification' in window) {
+              if (Notification.permission === 'granted') {
+                new Notification('🚨 CRITICAL FIRE ALERT!', {
+                  body: `${criticalAlerts.length} critical fire/smoke detection(s)`,
+                  icon: '🔥'
+                });
+              }
+            }
+          } else {
+            setFireAlerts([]);
+          }
+          
           if (newLogs.length > 0) {
             setRecentLogs(prev => [...newLogs, ...prev].slice(0, 100));
           }
@@ -77,6 +112,14 @@ function App() {
             setSystemStatus(prev => ({
               ...prev,
               demographics_enabled: data.demographics_enabled
+            }));
+          }
+          
+          // Update fire detection status if provided
+          if (data.fire_detection_enabled !== undefined) {
+            setSystemStatus(prev => ({
+              ...prev,
+              fire_detection_enabled: data.fire_detection_enabled
             }));
           }
         }
@@ -115,6 +158,11 @@ function App() {
       // Update demographics state if available
       if (data.demographics_enabled !== undefined) {
         setDemographicsEnabled(data.demographics_enabled);
+      }
+      
+      // Update fire detection state if available
+      if (data.fire_detection_enabled !== undefined) {
+        setFireDetectionEnabled(data.fire_detection_enabled);
       }
     } catch (error) {
       console.error('Error fetching status:', error);
@@ -189,6 +237,24 @@ function App() {
     }
   };
 
+  const toggleFireDetection = async (enabled) => {
+    try {
+      const response = await fetch(`${API_BASE}/api/fire/toggle`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ enabled })
+      });
+      const data = await response.json();
+      console.log('Fire detection toggled:', data);
+      setFireDetectionEnabled(enabled);
+      fetchStatus();
+    } catch (error) {
+      console.error('Error toggling fire detection:', error);
+    }
+  };
+
   const registerPerson = async (personData) => {
     try {
       const response = await fetch(`${API_BASE}/api/persons/register`, {
@@ -226,8 +292,16 @@ function App() {
   // Make toggleDemographics available globally for the Dashboard component
   useEffect(() => {
     window.toggleDemographics = toggleDemographics;
+    window.toggleFireDetection = toggleFireDetection;
+    
+    // Request notification permission
+    if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission();
+    }
+    
     return () => {
       delete window.toggleDemographics;
+      delete window.toggleFireDetection;
     };
   }, []);
 
@@ -244,6 +318,12 @@ function App() {
             <div className="demographics-indicator">
               <span className={`status-dot ${systemStatus.demographics_enabled ? 'connected' : 'disconnected'}`}></span>
               <span>🧠 Demographics: {systemStatus.demographics_enabled ? 'ON' : 'OFF'}</span>
+            </div>
+          )}
+          {systemStatus.fire_detection_enabled !== undefined && (
+            <div className="fire-indicator">
+              <span className={`status-dot ${systemStatus.fire_detection_enabled ? 'connected' : 'disconnected'}`}></span>
+              <span>🔥 Fire Detection: {systemStatus.fire_detection_enabled ? 'ON' : 'OFF'}</span>
             </div>
           )}
         </div>
@@ -288,11 +368,14 @@ function App() {
             videoFrame={videoFrame}
             systemStatus={systemStatus}
             recentLogs={recentLogs}
+            fireAlerts={fireAlerts}
             onStartCamera={startCamera}
             onStopCamera={stopCamera}
             onSetMode={setMode}
             onToggleDemographics={toggleDemographics}
+            onToggleFireDetection={toggleFireDetection}
             demographicsEnabled={demographicsEnabled}
+            fireDetectionEnabled={fireDetectionEnabled}
           />
         )}
         {activeTab === 'person-reg' && (

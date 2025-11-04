@@ -28,6 +28,7 @@ from facial_recognition_system import FacialRecognitionSystem
 from license_plate_recognition_system import LicensePlateRecognitionSystem
 from database_manager import DatabaseManager
 from face_detection import YuNetFaceDetector
+from fire_detection_system import FireDetectionSystem
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -302,6 +303,16 @@ class EnhancedSecuritySystemAPI:
         self.face_system = FacialRecognitionSystem(DB_CONFIG, camera_id="0")
         self.plate_system = LicensePlateRecognitionSystem(DB_CONFIG)
         
+        # Initialize fire detection system
+        try:
+            self.fire_system = FireDetectionSystem()
+            self.fire_detection_enabled = True
+            logger.info("✅ Fire detection system initialized")
+        except Exception as e:
+            logger.warning(f"⚠️ Fire detection system not available: {e}")
+            self.fire_system = None
+            self.fire_detection_enabled = False
+        
         # Initialize demographics analyzer
         self.demographics_analyzer = FaceDemographicsAnalyzer()
         self.demographics_enabled = True
@@ -318,8 +329,10 @@ class EnhancedSecuritySystemAPI:
         self.raw_frame_queue = queue.Queue(maxsize=10)
         self.face_processing_queue = queue.Queue(maxsize=10)
         self.plate_processing_queue = queue.Queue(maxsize=10)
+        self.fire_processing_queue = queue.Queue(maxsize=10)
         self.face_results_queue = queue.Queue(maxsize=10)
         self.plate_results_queue = queue.Queue(maxsize=10)
+        self.fire_results_queue = queue.Queue(maxsize=10)
         self.processed_frame_queue = queue.Queue(maxsize=10)
         
         self.client_connections: List[WebSocket] = []
@@ -340,6 +353,7 @@ class EnhancedSecuritySystemAPI:
             'frames_processed': 0,
             'face_detections': 0,
             'plate_detections': 0,
+            'fire_detections': 0,
             'frames_dropped': 0,
             'queue_skips': 0,
             'demographics_analyzed': 0,
@@ -370,7 +384,8 @@ class EnhancedSecuritySystemAPI:
                 "features": {
                     "face_recognition": True,
                     "license_plate_recognition": True,
-                    "demographics_analysis": DEEPFACE_AVAILABLE
+                    "demographics_analysis": DEEPFACE_AVAILABLE,
+                    "fire_detection": self.fire_system is not None
                 }
             }
         
@@ -382,6 +397,8 @@ class EnhancedSecuritySystemAPI:
                 "streaming": self.is_streaming,
                 "mode": self.current_mode,
                 "demographics_enabled": self.demographics_enabled and DEEPFACE_AVAILABLE,
+                "fire_detection_enabled": self.fire_detection_enabled,
+                "fire_system_available": self.fire_system is not None,
                 "statistics": stats,
                 "connected_clients": len(self.client_connections),
                 "performance": {
@@ -389,6 +406,7 @@ class EnhancedSecuritySystemAPI:
                     "frames_processed": self.stats['frames_processed'],
                     "face_detections": self.stats['face_detections'],
                     "plate_detections": self.stats['plate_detections'],
+                    "fire_detections": self.stats['fire_detections'],
                     "frames_dropped": self.stats['frames_dropped'],
                     "queue_skips": self.stats['queue_skips'],
                     "demographics_analyzed": self.stats['demographics_analyzed'],
@@ -450,6 +468,16 @@ class EnhancedSecuritySystemAPI:
             self.demographics_enabled = enabled
             logger.info(f"🧠 Demographics analysis: {'enabled' if enabled else 'disabled'}")
             return {"status": "success", "demographics_enabled": self.demographics_enabled}
+        
+        @self.app.post("/api/fire/toggle")
+        async def toggle_fire_detection(request: dict):
+            """Toggle fire detection on/off"""
+            if self.fire_system is None:
+                raise HTTPException(status_code=400, detail="Fire detection system not available")
+            enabled = request.get("enabled", True)
+            self.fire_detection_enabled = enabled
+            logger.info(f"🔥 Fire detection: {'enabled' if enabled else 'disabled'}")
+            return {"status": "success", "fire_detection_enabled": self.fire_detection_enabled}
         
         @self.app.post("/api/persons/register")
         async def register_person(person: PersonRegistration):
@@ -555,6 +583,7 @@ class EnhancedSecuritySystemAPI:
                             # Track if frame was successfully queued for processing
                             queued_for_face = False
                             queued_for_plate = False
+                            queued_for_fire = False
                             
                             # Try to queue for face processing
                             if mode in ["face", "both"]:
@@ -576,8 +605,18 @@ class EnhancedSecuritySystemAPI:
                             else:
                                 queued_for_plate = True
                             
+                            # Try to queue for fire detection (always if enabled)
+                            if self.fire_detection_enabled and self.fire_system:
+                                try:
+                                    self.fire_processing_queue.put((current_frame_id, frame.copy()), block=False)
+                                    queued_for_fire = True
+                                except queue.Full:
+                                    self.stats['queue_skips'] += 1
+                            else:
+                                queued_for_fire = True
+                            
                             # Only add to raw queue if successfully queued for processing
-                            if queued_for_face and queued_for_plate:
+                            if queued_for_face and queued_for_plate and queued_for_fire:
                                 try:
                                     self.raw_frame_queue.put((current_frame_id, frame.copy()), block=False)
                                 except queue.Full:
@@ -785,15 +824,56 @@ class EnhancedSecuritySystemAPI:
                     logger.error(f"❌ Error in plate processing thread: {e}")
                     time.sleep(0.1)
         
-        # Thread 4: Results Merging and Frame Encoding
+        # Thread 4: Fire Detection Processing
+        def fire_processing_thread():
+            """Process frames for fire and smoke detection"""
+            logger.info("🔥 Thread 4: Fire Detection started")
+            
+            while True:
+                try:
+                    frame_id, frame = self.fire_processing_queue.get(timeout=1.0)
+                    
+                    if not self.fire_detection_enabled or not self.fire_system:
+                        continue
+                    
+                    start_time = time.time()
+                    fire_results = self.fire_system.process_frame(frame)
+                    processing_time = time.time() - start_time
+                    
+                    if fire_results:
+                        self.stats['fire_detections'] += len(fire_results)
+                        logger.debug(f"🔥 Detected {len(fire_results)} fire/smoke in {processing_time:.3f}s")
+                        
+                        # Log critical alerts
+                        critical = [r for r in fire_results if r.get('severity') == 'critical']
+                        if critical:
+                            logger.warning(f"🚨 CRITICAL FIRE ALERT! {len(critical)} critical detection(s)")
+                    
+                    try:
+                        self.fire_results_queue.put((frame_id, fire_results), block=False)
+                    except queue.Full:
+                        try:
+                            self.fire_results_queue.get(block=False)
+                            self.fire_results_queue.put((frame_id, fire_results), block=False)
+                        except:
+                            pass
+                    
+                except queue.Empty:
+                    continue
+                except Exception as e:
+                    logger.error(f"❌ Error in fire processing thread: {e}")
+                    time.sleep(0.1)
+        
+        # Thread 5: Results Merging and Frame Encoding
         def merging_thread():
-            """Merge results from face and plate processing"""
-            logger.info("🔄 Thread 4: Results Merging started")
+            """Merge results from face, plate, and fire processing"""
+            logger.info("🔄 Thread 5: Results Merging started")
             
             pending_results = {
                 'frames': {},
                 'face': {},
-                'plate': {}
+                'plate': {},
+                'fire': {}
             }
             
             while True:
@@ -826,6 +906,15 @@ class EnhancedSecuritySystemAPI:
                         except queue.Empty:
                             pass
                     
+                    # Collect fire detection results (always if enabled)
+                    if self.fire_detection_enabled and self.fire_system:
+                        try:
+                            while True:
+                                frame_id, fire_results = self.fire_results_queue.get(block=False)
+                                pending_results['fire'][frame_id] = fire_results
+                        except queue.Empty:
+                            pass
+                    
                     # Process frames
                     frames_to_process = list(pending_results['frames'].keys())
                     
@@ -847,6 +936,7 @@ class EnhancedSecuritySystemAPI:
                             
                             face_results = []
                             plate_results = []
+                            fire_results = []
                             final_frame = frame.copy()
                             
                             # Get face results if available
@@ -860,8 +950,14 @@ class EnhancedSecuritySystemAPI:
                                 if plate_results:
                                     final_frame = self.plate_system.draw_outputs(final_frame, plate_results)
                             
+                            # Get fire results and draw if available
+                            if frame_id in pending_results['fire']:
+                                fire_results = pending_results['fire'].pop(frame_id)
+                                if fire_results:
+                                    final_frame = self.fire_system.draw_detections(final_frame, fire_results)
+                            
                             # Encode and queue for sending
-                            self._encode_and_queue_frame(final_frame, face_results, plate_results)
+                            self._encode_and_queue_frame(final_frame, face_results, plate_results, fire_results)
                             self.stats['frames_processed'] += 1
                     
                     # Clean up old cached results
@@ -879,6 +975,7 @@ class EnhancedSecuritySystemAPI:
             threading.Thread(target=capture_thread, daemon=True, name="CaptureThread"),
             threading.Thread(target=face_processing_thread, daemon=True, name="FaceProcessingThread"),
             threading.Thread(target=plate_processing_thread, daemon=True, name="PlateProcessingThread"),
+            threading.Thread(target=fire_processing_thread, daemon=True, name="FireProcessingThread"),
             threading.Thread(target=merging_thread, daemon=True, name="MergingThread")
         ]
         
@@ -1073,13 +1170,13 @@ class EnhancedSecuritySystemAPI:
     
     def _cleanup_old_results(self, pending_results: Dict, current_frame_id: int, max_age: int = 90):
         """Remove old cached results"""
-        for result_type in ['frames', 'face', 'plate']:
+        for result_type in ['frames', 'face', 'plate', 'fire']:
             old_frame_ids = [fid for fid in pending_results[result_type].keys() 
                            if (current_frame_id - fid) > max_age]
             for fid in old_frame_ids:
                 pending_results[result_type].pop(fid, None)
     
-    def _encode_and_queue_frame(self, frame, face_results, plate_results):
+    def _encode_and_queue_frame(self, frame, face_results, plate_results, fire_results=None):
         """Encode frame to JPEG and add to output queue"""
         try:
             height, width = frame.shape[:2]
@@ -1098,8 +1195,10 @@ class EnhancedSecuritySystemAPI:
                 "frame": frame_base64,
                 "face_results": convert_to_serializable(face_results),
                 "plate_results": convert_to_serializable(plate_results),
+                "fire_results": convert_to_serializable(fire_results) if fire_results else [],
                 "timestamp": datetime.now().isoformat(),
-                "demographics_enabled": self.demographics_enabled
+                "demographics_enabled": self.demographics_enabled,
+                "fire_detection_enabled": self.fire_detection_enabled
             }
             
             try:
@@ -1120,8 +1219,10 @@ class EnhancedSecuritySystemAPI:
             self.raw_frame_queue,
             self.face_processing_queue,
             self.plate_processing_queue,
+            self.fire_processing_queue,
             self.face_results_queue,
             self.plate_results_queue,
+            self.fire_results_queue,
             self.processed_frame_queue
         ]
         
@@ -1148,12 +1249,13 @@ if __name__ == "__main__":
     logger.info("📡 API: http://localhost:8000")
     logger.info("🔌 WebSocket: ws://localhost:8000/ws")
     logger.info("📚 Docs: http://localhost:8000/docs")
-    logger.info("🧵 Multi-threaded processing: 5 threads")
+    logger.info("🧵 Multi-threaded processing: 6 threads")
     logger.info("   - Thread 1: Video Capture")
     logger.info("   - Thread 2: Facial Recognition + Demographics")
     logger.info("   - Thread 3: License Plate Recognition")
-    logger.info("   - Thread 4: Results Merging")
-    logger.info("   - Thread 5: Demographics Analysis (DeepFace)")
+    logger.info("   - Thread 4: Fire & Smoke Detection")
+    logger.info("   - Thread 5: Results Merging")
+    logger.info("   - Thread 6: Demographics Analysis (DeepFace)")
     
     if DEEPFACE_AVAILABLE:
         logger.info("✅ DeepFace enabled - demographics analysis available")
@@ -1162,7 +1264,7 @@ if __name__ == "__main__":
     
     try:
         uvicorn.run(
-            "app_with_demographics:app",
+            "app:app",
             host="0.0.0.0", 
             port=8000, 
             reload=False,

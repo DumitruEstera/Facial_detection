@@ -1,6 +1,18 @@
 import React from 'react';
 
-const Dashboard = ({ videoFrame, systemStatus, recentLogs, onStartCamera, onStopCamera, onSetMode }) => {
+const Dashboard = ({ 
+  videoFrame, 
+  systemStatus, 
+  recentLogs, 
+  fireAlerts = [],
+  onStartCamera, 
+  onStopCamera, 
+  onSetMode,
+  onToggleDemographics,
+  onToggleFireDetection,
+  demographicsEnabled,
+  fireDetectionEnabled
+}) => {
   // Helper function to format demographics display
   const formatDemographics = (log) => {
     if (log.name !== 'Unknown' || (!log.age && !log.gender && !log.emotion)) {
@@ -73,21 +85,73 @@ const Dashboard = ({ videoFrame, systemStatus, recentLogs, onStartCamera, onStop
               <label>
                 <input 
                   type="checkbox" 
-                  checked={systemStatus.demographics_enabled}
-                  onChange={(e) => {
-                    // This would need to be passed as a prop from App.js
-                    if (window.toggleDemographics) {
-                      window.toggleDemographics(e.target.checked);
-                    }
-                  }}
+                  checked={demographicsEnabled}
+                  onChange={(e) => onToggleDemographics && onToggleDemographics(e.target.checked)}
                 />
                 <span> 🧠 Enable Demographics Analysis</span>
+              </label>
+            </div>
+          )}
+          
+          {/* Fire detection toggle if available */}
+          {systemStatus.fire_system_available && (
+            <div className="fire-toggle">
+              <label>
+                <input 
+                  type="checkbox" 
+                  checked={fireDetectionEnabled}
+                  onChange={(e) => onToggleFireDetection && onToggleFireDetection(e.target.checked)}
+                />
+                <span> 🔥 Enable Fire Detection</span>
               </label>
             </div>
           )}
         </div>
         
         <div className="info-section">
+          {/* Fire Alerts Banner - Show if there are active fire/smoke detections */}
+          {fireAlerts && fireAlerts.length > 0 && (
+            <div className="fire-alerts-banner">
+              {fireAlerts.some(alert => alert.severity === 'critical') && (
+                <div className="fire-alert critical">
+                  <div className="fire-alert-icon">🚨</div>
+                  <div className="fire-alert-content">
+                    <div className="fire-alert-title">CRITICAL FIRE ALERT!</div>
+                    <div className="fire-alert-details">
+                      {fireAlerts.filter(a => a.severity === 'critical').length} critical detection(s)
+                    </div>
+                  </div>
+                </div>
+              )}
+              {fireAlerts.filter(alert => alert.severity === 'high').length > 0 && (
+                <div className="fire-alert high">
+                  <div className="fire-alert-icon">🔥</div>
+                  <div className="fire-alert-content">
+                    <div className="fire-alert-title">HIGH Fire/Smoke Alert</div>
+                    <div className="fire-alert-details">
+                      {fireAlerts.filter(a => a.severity === 'high').map((alert, idx) => (
+                        <div key={idx}>
+                          {alert.class.toUpperCase()} detected ({(alert.confidence * 100).toFixed(0)}%)
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+              {fireAlerts.filter(alert => ['medium', 'low'].includes(alert.severity)).length > 0 && (
+                <div className="fire-alert medium">
+                  <div className="fire-alert-icon">⚠️</div>
+                  <div className="fire-alert-content">
+                    <div className="fire-alert-title">Fire/Smoke Warning</div>
+                    <div className="fire-alert-details">
+                      {fireAlerts.filter(a => ['medium', 'low'].includes(a.severity)).length} detection(s)
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+          
           <div className="status-card">
             <h3>System Status</h3>
             <div className="status-items">
@@ -110,6 +174,14 @@ const Dashboard = ({ videoFrame, systemStatus, recentLogs, onStartCamera, onStop
                   <span>Demographics:</span>
                   <span className={systemStatus.demographics_enabled ? 'status-active' : 'status-inactive'}>
                     {systemStatus.demographics_enabled ? 'Enabled' : 'Disabled'}
+                  </span>
+                </div>
+              )}
+              {systemStatus.fire_detection_enabled !== undefined && (
+                <div className="status-item">
+                  <span>Fire Detection:</span>
+                  <span className={systemStatus.fire_detection_enabled ? 'status-active' : 'status-inactive'}>
+                    {systemStatus.fire_detection_enabled ? 'Enabled' : 'Disabled'}
                   </span>
                 </div>
               )}
@@ -136,6 +208,17 @@ const Dashboard = ({ videoFrame, systemStatus, recentLogs, onStartCamera, onStop
                             {formatDemographics(log)}
                           </div>
                         )}
+                      </div>
+                    ) : log.type === 'fire' ? (
+                      <div>
+                        <span className={`fire-log severity-${log.severity}`}>
+                          {log.class === 'fire' ? '🔥' : '💨'} {log.class.toUpperCase()} 
+                          {` (${(log.confidence * 100).toFixed(1)}%)`}
+                          <span className={`severity-badge ${log.severity}`}>
+                            {log.severity.toUpperCase()}
+                          </span>
+                          {log.alert && <span className="alert-badge">⚠️ ALERT</span>}
+                        </span>
                       </div>
                     ) : (
                       <span>

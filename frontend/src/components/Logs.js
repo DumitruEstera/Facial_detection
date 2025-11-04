@@ -44,6 +44,12 @@ const Logs = ({ logs }) => {
           >
             🚗 License Plates
           </button>
+          <button 
+            className={filter === 'fire' ? 'btn btn-active' : 'btn btn-outline'}
+            onClick={() => setFilter('fire')}
+          >
+            🔥 Fire Detection
+          </button>
         </div>
       </div>
       
@@ -62,7 +68,7 @@ const Logs = ({ logs }) => {
               {new Date(log.timestamp).toLocaleString()}
             </div>
             <div className="log-type">
-              {log.type === 'face' ? '👤 Face' : '🚗 Plate'}
+              {log.type === 'face' ? '👤 Face' : log.type === 'fire' ? '� Fire' : '�🚗 Plate'}
             </div>
             <div className="log-details">
               {log.type === 'face' ? (
@@ -72,6 +78,20 @@ const Logs = ({ logs }) => {
                   {log.confidence && log.confidence > 0 && (
                     <span className="confidence">
                       {(log.confidence * 100).toFixed(1)}%
+                    </span>
+                  )}
+                </span>
+              ) : log.type === 'fire' ? (
+                <span>
+                  <strong>{log.class ? log.class.toUpperCase() : 'Detection'}</strong>
+                  {log.confidence && (
+                    <span className="confidence">
+                      {(log.confidence * 100).toFixed(1)}%
+                    </span>
+                  )}
+                  {log.severity && (
+                    <span className={`severity-badge ${log.severity}`}>
+                      {log.severity.toUpperCase()}
                     </span>
                   )}
                 </span>
@@ -98,6 +118,12 @@ const Logs = ({ logs }) => {
                   <span className="status-unknown">Unknown</span>
                 ) : (
                   <span className="status-recognized">Recognized</span>
+                )
+              ) : log.type === 'fire' ? (
+                log.alert ? (
+                  <span className="status-unauthorized">⚠️ ALERT</span>
+                ) : (
+                  <span className="status-unknown">Detected</span>
                 )
               ) : (
                 <span className={log.authorised || log.is_authorized ? 'status-authorized' : 'status-unauthorized'}>
