@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import './App.css';
 import './demographics_styles.css';  // Additional styles for demographics
+import MultiCameraGrid from './components/MultiCameraGrid';
 
 // Import components
 import Dashboard from './components/Dashboard';
@@ -15,13 +16,31 @@ import Statistics from './components/Statistics';
 const API_BASE = 'http://localhost:8000';
 const WS_URL = 'ws://localhost:8000/ws';
 
+// Initial camera definitions (static data outside component to avoid redefinition on re-render)
+const INITIAL_CAMERAS = [
+  { id: 'CAM-01', status: 'inactive', stream: null, location: 'Main Entrance' },
+  { id: 'CAM-02', status: 'inactive', stream: null, location: 'Parking Lot' },
+  { id: 'CAM-03', status: 'inactive', stream: null, location: 'Rear Exit' },
+  { id: 'CAM-04', status: 'inactive', stream: null, location: 'Lobby' },
+  { id: 'CAM-05', status: 'inactive', stream: null, location: 'Corridor A' },
+  { id: 'CAM-06', status: 'inactive', stream: null, location: 'Corridor B' },
+  { id: 'CAM-07', status: 'inactive', stream: null, location: 'Server Room' },
+  { id: 'CAM-08', status: 'inactive', stream: null, location: 'Storage Area' },
+  { id: 'CAM-09', status: 'inactive', stream: null, location: 'Emergency Exit' }
+];
+
 function App() {
+  // Moved hook declarations inside the component to comply with React Hooks rules
+  const [cameras, setCameras] = useState(INITIAL_CAMERAS);
+  const [alerts, setAlerts] = useState([]);
   const [activeTab, setActiveTab] = useState('dashboard');
   const [systemStatus, setSystemStatus] = useState({});
   const [isConnected, setIsConnected] = useState(false);
   const [videoFrame, setVideoFrame] = useState(null);
   const [recentLogs, setRecentLogs] = useState([]);
   const [ws, setWs] = useState(null);
+  const [faceDetectionEnabled, setFaceDetectionEnabled] = useState(true);
+  const [plateDetectionEnabled, setPlateDetectionEnabled] = useState(true);
   const [demographicsEnabled, setDemographicsEnabled] = useState(true);
   const [fireDetectionEnabled, setFireDetectionEnabled] = useState(true);
   const [fireAlerts, setFireAlerts] = useState([]);
@@ -40,89 +59,70 @@ function App() {
         const data = JSON.parse(event.data);
         
         if (data.type === 'video_frame') {
+          // Update the videoFrame state for backward compatibility
           setVideoFrame(data.frame);
           
-          // Process face results with demographics
-          const newLogs = [];
+          // NEW: Update the cameras array for multi-camera view
+          // For now, update CAM-01 with your single camera
+          // Later you can modify your backend to send camera_id
+          setCameras(prevCameras => 
+            prevCameras.map(camera => 
+              camera.id === 'CAM-01' // or data.cameraId when you add it to backend
+                ? { 
+                    ...camera, 
+                    stream: `data:image/jpeg;base64,${data.frame}`,
+                    status: 'active'
+                  }
+                : camera
+            )
+          );
+          
+          // Process alerts from detection results
+          const newAlerts = [];
+          
+          // Face detection alerts
           if (data.face_results) {
             data.face_results.forEach(result => {
-              const logEntry = {
-                type: 'face',
-                timestamp: data.timestamp,
-                ...result
-              };
-              
-              // Mark if has demographics
-              if (result.name === 'Unknown' && (result.age || result.gender || result.emotion)) {
-                logEntry.hasDemographics = true;
-              }
-              
-              newLogs.push(logEntry);
-            });
-          }
-          
-          // Process plate results
-          if (data.plate_results) {
-            data.plate_results.forEach(result => {
-              newLogs.push({
-                type: 'plate',
-                timestamp: data.timestamp,
-                ...result
-              });
-            });
-          }
-          
-          // Process fire detection results
-          if (data.fire_results && data.fire_results.length > 0) {
-            const criticalAlerts = data.fire_results.filter(r => r.severity === 'critical');
-            const highAlerts = data.fire_results.filter(r => r.severity === 'high');
-            
-            // Update fire alerts state
-            setFireAlerts(data.fire_results);
-            
-            // Add to logs
-            data.fire_results.forEach(result => {
-              newLogs.push({
-                type: 'fire',
-                timestamp: data.timestamp,
-                class: result.class,
-                confidence: result.confidence,
-                severity: result.severity,
-                alert: result.alert
-              });
-            });
-            
-            // Show browser notification for critical alerts
-            if (criticalAlerts.length > 0 && 'Notification' in window) {
-              if (Notification.permission === 'granted') {
-                new Notification('🚨 CRITICAL FIRE ALERT!', {
-                  body: `${criticalAlerts.length} critical fire/smoke detection(s)`,
-                  icon: '🔥'
+              if (result.name === 'Unknown') {
+                newAlerts.push({
+                  cameraId: 'CAM-01', // or data.cameraId
+                  type: 'unauthorized',
+                  severity: 'critical',
+                  timestamp: new Date().toISOString(),
+                  description: `Unauthorized person detected with ${result.confidence}% confidence`
                 });
               }
-            }
-          } else {
-            setFireAlerts([]);
+            });
           }
           
-          if (newLogs.length > 0) {
-            setRecentLogs(prev => [...newLogs, ...prev].slice(0, 100));
+          // Fire detection alerts
+          if (data.fire_results && data.fire_results.length > 0) {
+            newAlerts.push({
+              cameraId: 'CAM-01', // or data.cameraId
+              type: 'fire',
+              severity: 'critical',
+              timestamp: new Date().toISOString(),
+              description: 'Fire detected!'
+            });
           }
           
-          // Update demographics status if provided
-          if (data.demographics_enabled !== undefined) {
-            setSystemStatus(prev => ({
-              ...prev,
-              demographics_enabled: data.demographics_enabled
-            }));
+          // License plate alerts
+          if (data.plate_results) {
+            data.plate_results.forEach(result => {
+              if (result.status === 'Unknown') {
+                newAlerts.push({
+                  cameraId: 'CAM-01', // or data.cameraId
+                  type: 'unauthorized',
+                  severity: 'high',
+                  timestamp: new Date().toISOString(),
+                  description: `Unregistered vehicle: ${result.text}`
+                });
+              }
+            });
           }
           
-          // Update fire detection status if provided
-          if (data.fire_detection_enabled !== undefined) {
-            setSystemStatus(prev => ({
-              ...prev,
-              fire_detection_enabled: data.fire_detection_enabled
-            }));
+          if (newAlerts.length > 0) {
+            setAlerts(prev => [...newAlerts, ...prev]);
           }
         }
       };
@@ -156,6 +156,15 @@ function App() {
       const response = await fetch(`${API_BASE}/api/status`);
       const data = await response.json();
       setSystemStatus(data);
+      
+      // Update detection states if available
+      if (data.face_detection_enabled !== undefined) {
+        setFaceDetectionEnabled(data.face_detection_enabled);
+      }
+      
+      if (data.plate_detection_enabled !== undefined) {
+        setPlateDetectionEnabled(data.plate_detection_enabled);
+      }
       
       // Update demographics state if available
       if (data.demographics_enabled !== undefined) {
@@ -204,20 +213,39 @@ function App() {
     }
   };
 
-  const setMode = async (mode) => {
+  const toggleFaceDetection = async (enabled) => {
     try {
-      const response = await fetch(`${API_BASE}/api/camera/mode`, {
+      const response = await fetch(`${API_BASE}/api/face/toggle`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ mode })
+        body: JSON.stringify({ enabled })
       });
       const data = await response.json();
-      console.log('Mode set:', data);
+      console.log('Face detection toggled:', data);
+      setFaceDetectionEnabled(enabled);
       fetchStatus();
     } catch (error) {
-      console.error('Error setting mode:', error);
+      console.error('Error toggling face detection:', error);
+    }
+  };
+
+  const togglePlateDetection = async (enabled) => {
+    try {
+      const response = await fetch(`${API_BASE}/api/plate/toggle`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ enabled })
+      });
+      const data = await response.json();
+      console.log('Plate detection toggled:', data);
+      setPlateDetectionEnabled(enabled);
+      fetchStatus();
+    } catch (error) {
+      console.error('Error toggling plate detection:', error);
     }
   };
 
@@ -318,19 +346,19 @@ function App() {
         onStopCamera={stopCamera}
       >
         {activeTab === 'dashboard' && (
-          <ModernDashboard 
-            videoFrame={videoFrame}
+          <MultiCameraGrid 
+            cameras={cameras}
+            alerts={alerts}
+            onCameraClick={(camera) => console.log('Camera clicked:', camera)}
             systemStatus={systemStatus}
-            recentLogs={recentLogs}
-            fireAlerts={fireAlerts}
-            onStartCamera={startCamera}
-            onStopCamera={stopCamera}
-            onSetMode={setMode}
+            onToggleFaceDetection={toggleFaceDetection}
+            onTogglePlateDetection={togglePlateDetection}
             onToggleDemographics={toggleDemographics}
             onToggleFireDetection={toggleFireDetection}
+            faceDetectionEnabled={faceDetectionEnabled}
+            plateDetectionEnabled={plateDetectionEnabled}
             demographicsEnabled={demographicsEnabled}
             fireDetectionEnabled={fireDetectionEnabled}
-            isConnected={isConnected}
           />
         )}
         {activeTab === 'person-reg' && (

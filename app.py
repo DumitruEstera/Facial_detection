@@ -323,7 +323,10 @@ class EnhancedSecuritySystemAPI:
         # Video streaming
         self.video_capture = None
         self.is_streaming = False
-        self.current_mode = "both"
+        
+        # Independent detection flags - allows any combination
+        self.face_detection_enabled = True
+        self.plate_detection_enabled = True
         
         # Multi-threaded queue system
         self.raw_frame_queue = queue.Queue(maxsize=10)
@@ -395,7 +398,8 @@ class EnhancedSecuritySystemAPI:
             return {
                 "status": "online",
                 "streaming": self.is_streaming,
-                "mode": self.current_mode,
+                "face_detection_enabled": self.face_detection_enabled,
+                "plate_detection_enabled": self.plate_detection_enabled,
                 "demographics_enabled": self.demographics_enabled and DEEPFACE_AVAILABLE,
                 "fire_detection_enabled": self.fire_detection_enabled,
                 "fire_system_available": self.fire_system is not None,
@@ -452,14 +456,21 @@ class EnhancedSecuritySystemAPI:
                 logger.error(f"❌ Error stopping camera: {e}")
                 raise HTTPException(status_code=500, detail=str(e))
         
-        @self.app.post("/api/camera/mode")
-        async def set_mode(request: dict):
-            mode = request.get("mode")
-            if mode not in ["face", "plate", "both", "none"]:
-                raise HTTPException(status_code=400, detail="Invalid mode")
-            self.current_mode = mode
-            logger.info(f"🔄 Detection mode set to: {mode}")
-            return {"status": "success", "mode": mode}
+        @self.app.post("/api/face/toggle")
+        async def toggle_face_detection(request: dict):
+            """Toggle face detection on/off"""
+            enabled = request.get("enabled", True)
+            self.face_detection_enabled = enabled
+            logger.info(f"👤 Face detection: {'enabled' if enabled else 'disabled'}")
+            return {"status": "success", "face_detection_enabled": self.face_detection_enabled}
+        
+        @self.app.post("/api/plate/toggle")
+        async def toggle_plate_detection(request: dict):
+            """Toggle license plate detection on/off"""
+            enabled = request.get("enabled", True)
+            self.plate_detection_enabled = enabled
+            logger.info(f"� License plate detection: {'enabled' if enabled else 'disabled'}")
+            return {"status": "success", "plate_detection_enabled": self.plate_detection_enabled}
         
         @self.app.post("/api/demographics/toggle")
         async def toggle_demographics(request: dict):
@@ -578,15 +589,13 @@ class EnhancedSecuritySystemAPI:
                             if self.frame_counter % self.frame_skip != 0:
                                 continue
                             
-                            mode = self.current_mode
-                            
                             # Track if frame was successfully queued for processing
                             queued_for_face = False
                             queued_for_plate = False
                             queued_for_fire = False
                             
                             # Try to queue for face processing
-                            if mode in ["face", "both"]:
+                            if self.face_detection_enabled:
                                 try:
                                     self.face_processing_queue.put((current_frame_id, frame.copy()), block=False)
                                     queued_for_face = True
@@ -596,7 +605,7 @@ class EnhancedSecuritySystemAPI:
                                 queued_for_face = True
                             
                             # Try to queue for plate processing
-                            if mode in ["plate", "both"]:
+                            if self.plate_detection_enabled:
                                 try:
                                     self.plate_processing_queue.put((current_frame_id, frame.copy()), block=False)
                                     queued_for_plate = True
@@ -615,9 +624,9 @@ class EnhancedSecuritySystemAPI:
                             else:
                                 queued_for_fire = True
                             
-                            # For 'none' mode, always add frame to raw queue (no detection needed)
-                            # For other modes, only add if successfully queued for processing
-                            if mode == "none" or (queued_for_face and queued_for_plate and queued_for_fire):
+                            # Always add frame to raw queue if successfully queued for all enabled processing
+                            # If no detection is enabled, frames still go through
+                            if queued_for_face and queued_for_plate and queued_for_fire:
                                 try:
                                     self.raw_frame_queue.put((current_frame_id, frame.copy()), block=False)
                                 except queue.Full:
@@ -656,6 +665,8 @@ class EnhancedSecuritySystemAPI:
                         # Get bounding boxes of recognized faces
                         recognized_bboxes = [result['bbox'] for result in face_results if 'bbox' in result]
                         
+                        logger.debug(f"🔍 Found {len(all_faces)} total faces, {len(recognized_bboxes)} recognized")
+                        
                         # Find unknown faces
                         unknown_faces = []
                         for face_bbox in all_faces:
@@ -669,6 +680,9 @@ class EnhancedSecuritySystemAPI:
                             
                             if not is_recognized:
                                 unknown_faces.append(face_bbox)
+                        
+                        if unknown_faces:
+                            logger.info(f"👤 Detected {len(unknown_faces)} unknown face(s)")
                         
                         # Queue unknown faces for demographic analysis
                         for face_bbox in unknown_faces:
@@ -753,6 +767,8 @@ class EnhancedSecuritySystemAPI:
                                         'emotion': demographics.get('emotion', '')
                                     })
                                     
+                                    logger.info(f"✅ Applied demographics for request_id={req_id}: Age={demographics.get('age')}, Gender={demographics.get('gender')}, Emotion={demographics.get('emotion')}")
+                                    
                                     # Update the cache so future frames can reuse this data
                                     bbox = result.get('bbox')
                                     if bbox:
@@ -762,7 +778,6 @@ class EnhancedSecuritySystemAPI:
                                                 self.unknown_faces_cache[bbox_key]['demographics'] = demographics
                                     
                                     self.stats['demographics_analyzed'] += 1
-                                    # logger.info(f"✅ Applied demographics for request_id={req_id}: Age={demographics.get('age')}, Gender={demographics.get('gender')}, Emotion={demographics.get('emotion')}")
                         
                         # Periodically clean up old cached unknown faces and pending results
                         if self.frame_id % 100 == 0:
@@ -879,8 +894,6 @@ class EnhancedSecuritySystemAPI:
             
             while True:
                 try:
-                    mode = self.current_mode
-                    
                     # Collect raw frames
                     try:
                         while True:
@@ -889,8 +902,8 @@ class EnhancedSecuritySystemAPI:
                     except queue.Empty:
                         pass
                     
-                    # Collect face results
-                    if mode in ["face", "both"]:
+                    # Collect face results if face detection is enabled
+                    if self.face_detection_enabled:
                         try:
                             while True:
                                 frame_id, processed_frame, face_results = self.face_results_queue.get(block=False)
@@ -898,8 +911,8 @@ class EnhancedSecuritySystemAPI:
                         except queue.Empty:
                             pass
                     
-                    # Collect plate results
-                    if mode in ["plate", "both"]:
+                    # Collect plate results if plate detection is enabled
+                    if self.plate_detection_enabled:
                         try:
                             while True:
                                 frame_id, plate_results = self.plate_results_queue.get(block=False)
@@ -907,7 +920,7 @@ class EnhancedSecuritySystemAPI:
                         except queue.Empty:
                             pass
                     
-                    # Collect fire detection results (always if enabled)
+                    # Collect fire detection results if fire detection is enabled
                     if self.fire_detection_enabled and self.fire_system:
                         try:
                             while True:
@@ -923,17 +936,22 @@ class EnhancedSecuritySystemAPI:
                         should_process = False
                         use_timeout = self._is_frame_too_old(frame_id, max_age=60)
                         
-                        if mode == "none":
-                            # Process immediately - no detection needed
+                        # Determine if we should process this frame
+                        # Check if all ENABLED detections have results or timeout occurred
+                        expected_results_ready = True
+                        
+                        if self.face_detection_enabled:
+                            expected_results_ready = expected_results_ready and (frame_id in pending_results['face'] or use_timeout)
+                        
+                        if self.plate_detection_enabled:
+                            expected_results_ready = expected_results_ready and (frame_id in pending_results['plate'] or use_timeout)
+                        
+                        # Fire detection results are optional (merged when available)
+                        # If no detection is enabled, process immediately
+                        if not self.face_detection_enabled and not self.plate_detection_enabled:
                             should_process = True
-                        elif mode == "face":
-                            should_process = frame_id in pending_results['face'] or use_timeout
-                        elif mode == "plate":
-                            should_process = frame_id in pending_results['plate'] or use_timeout
-                        elif mode == "both":
-                            has_face = frame_id in pending_results['face']
-                            has_plate = frame_id in pending_results['plate']
-                            should_process = (has_face or has_plate) or use_timeout
+                        else:
+                            should_process = expected_results_ready
                         
                         if should_process:
                             frame = pending_results['frames'].pop(frame_id)
@@ -1086,19 +1104,60 @@ class EnhancedSecuritySystemAPI:
                 if bbox:
                     x, y, w, h = bbox
                     
-                    # Get demographics
+                    # Draw RED bounding box for unknown faces
+                    cv2.rectangle(output, (x, y), (x + w, y + h), (0, 0, 255), 2)
+                    
+                    # Draw "Unknown" label at the top
+                    label_text = "Unknown"
+                    (label_width, label_height), _ = cv2.getTextSize(
+                        label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1
+                    )
+                    
+                    # Draw background for "Unknown" label
+                    cv2.rectangle(
+                        output,
+                        (x, y - label_height - 4),
+                        (x + label_width, y),
+                        (0, 0, 255),
+                        -1
+                    )
+                    
+                    # Draw "Unknown" text
+                    cv2.putText(
+                        output,
+                        label_text,
+                        (x, y - 2),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        (255, 255, 255),
+                        1
+                    )
+                    
+                    # Get demographics - check if analysis is complete
                     age = result.get('age', '')
                     gender = result.get('gender', '')
                     emotion = result.get('emotion', '')
                     
                     # Prepare labels
                     labels = []
-                    if age:
+                    
+                    # Always show demographic info or "Analyzing..." status
+                    if age and gender and emotion:
+                        # All demographics available
                         labels.append(f"Age: {age}")
-                    if gender:
                         labels.append(f"Gender: {gender}")
-                    if emotion:
                         labels.append(f"Emotion: {emotion}")
+                    elif age or gender or emotion:
+                        # Partial demographics available
+                        if age:
+                            labels.append(f"Age: {age}")
+                        if gender:
+                            labels.append(f"Gender: {gender}")
+                        if emotion:
+                            labels.append(f"Emotion: {emotion}")
+                    else:
+                        # No demographics yet - show analyzing status
+                        labels.append("Analyzing...")
                     
                     if labels:
                         # Draw background rectangle for text
@@ -1126,6 +1185,8 @@ class EnhancedSecuritySystemAPI:
                         # Ensure text stays within frame bounds
                         if text_y + bg_height > output.shape[0]:
                             text_y = y - bg_height - 5
+                        if text_x + bg_width > output.shape[1]:
+                            text_x = output.shape[1] - bg_width - 5
                         
                         # Draw semi-transparent background
                         overlay = output.copy()
@@ -1141,13 +1202,15 @@ class EnhancedSecuritySystemAPI:
                         # Draw each label
                         for i, label in enumerate(labels):
                             y_offset = text_y + padding + (i + 1) * line_height - 5
+                            # Use different color for "Analyzing..." 
+                            color = (128, 128, 128) if label == "Analyzing..." else (0, 255, 255)  # Gray for analyzing, Yellow for results
                             cv2.putText(
                                 output,
                                 label,
                                 (text_x + padding, y_offset),
                                 font,
                                 font_scale,
-                                (0, 255, 255),  # Yellow color
+                                color,
                                 font_thickness
                             )
         

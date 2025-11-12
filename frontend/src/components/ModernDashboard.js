@@ -8,9 +8,12 @@ const ModernDashboard = ({
   fireAlerts = [],
   onStartCamera, 
   onStopCamera, 
-  onSetMode,
+  onToggleFaceDetection,
+  onTogglePlateDetection,
   onToggleDemographics,
   onToggleFireDetection,
+  faceDetectionEnabled = true,
+  plateDetectionEnabled = true,
   demographicsEnabled = false,
   fireDetectionEnabled = false,
   isConnected = false
@@ -69,23 +72,8 @@ const ModernDashboard = ({
                 <label className="toggle-switch">
                   <input 
                     type="checkbox" 
-                    checked={(systemStatus?.mode === 'face' || systemStatus?.mode === 'both') || false}
-                    onChange={(e) => {
-                      if (onSetMode) {
-                        const currentMode = systemStatus?.mode || 'both';
-                        const plateEnabled = currentMode === 'plate' || currentMode === 'both';
-                        
-                        if (e.target.checked) {
-                          // Turning face ON
-                          const newMode = plateEnabled ? 'both' : 'face';
-                          onSetMode(newMode);
-                        } else {
-                          // Turning face OFF
-                          const newMode = plateEnabled ? 'plate' : 'none';
-                          onSetMode(newMode);
-                        }
-                      }
-                    }}
+                    checked={faceDetectionEnabled}
+                    onChange={(e) => onToggleFaceDetection && onToggleFaceDetection(e.target.checked)}
                   />
                   <span className="toggle-slider"></span>
                 </label>
@@ -106,23 +94,8 @@ const ModernDashboard = ({
                 <label className="toggle-switch">
                   <input 
                     type="checkbox" 
-                    checked={(systemStatus?.mode === 'plate' || systemStatus?.mode === 'both') || false}
-                    onChange={(e) => {
-                      if (onSetMode) {
-                        const currentMode = systemStatus?.mode || 'both';
-                        const faceEnabled = currentMode === 'face' || currentMode === 'both';
-                        
-                        if (e.target.checked) {
-                          // Turning plate ON
-                          const newMode = faceEnabled ? 'both' : 'plate';
-                          onSetMode(newMode);
-                        } else {
-                          // Turning plate OFF
-                          const newMode = faceEnabled ? 'face' : 'none';
-                          onSetMode(newMode);
-                        }
-                      }
-                    }}
+                    checked={plateDetectionEnabled}
+                    onChange={(e) => onTogglePlateDetection && onTogglePlateDetection(e.target.checked)}
                   />
                   <span className="toggle-slider"></span>
                 </label>
