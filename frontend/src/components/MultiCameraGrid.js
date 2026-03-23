@@ -10,10 +10,12 @@ const MultiCameraGrid = ({
   onTogglePlateDetection,
   onToggleDemographics,
   onToggleFireDetection,
+  onToggleHar,                                   // NEW
   faceDetectionEnabled = true,
   plateDetectionEnabled = true,
   demographicsEnabled = false,
-  fireDetectionEnabled = false
+  fireDetectionEnabled = false,
+  harEnabled = false                              // NEW
 }) => {
   const [selectedCamera, setSelectedCamera] = useState(null);
 
@@ -155,6 +157,19 @@ const MultiCameraGrid = ({
                   <span className="toggle-slider"></span>
                 </label>
               </div>
+
+              {/* NEW: Human Action Recognition Toggle */}
+              <div className="toggle-item">
+                <span className="toggle-label">Action Recognition</span>
+                <label className="toggle-switch">
+                  <input 
+                    type="checkbox" 
+                    checked={harEnabled}
+                    onChange={(e) => onToggleHar && onToggleHar(e.target.checked)}
+                  />
+                  <span className="toggle-slider"></span>
+                </label>
+              </div>
             </div>
           </div>
         </div>
@@ -179,9 +194,10 @@ const MultiCameraGrid = ({
                   <div className="alert-title">
                     {alert.type === 'unauthorized' && '🚨 Unauthorized Access'}
                     {alert.type === 'fire' && '🔥 Fire Detected'}
+                    {alert.type === 'har' && '🏃 Action Alert'}
                     {alert.type === 'motion' && '👁️ Motion Detected'}
                     {alert.type === 'intrusion' && '⚠️ Perimeter Breach'}
-                    {!['unauthorized', 'fire', 'motion', 'intrusion'].includes(alert.type) && '⚠️ Alert'}
+                    {!['unauthorized', 'fire', 'har', 'motion', 'intrusion'].includes(alert.type) && '⚠️ Alert'}
                   </div>
                   <div className="alert-camera">{alert.cameraId}</div>
                   <div className="alert-time">{new Date(alert.timestamp).toLocaleString()}</div>

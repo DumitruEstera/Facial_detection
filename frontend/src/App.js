@@ -30,7 +30,6 @@ const INITIAL_CAMERAS = [
 ];
 
 function App() {
-  // Moved hook declarations inside the component to comply with React Hooks rules
   const [cameras, setCameras] = useState(INITIAL_CAMERAS);
   const [alerts, setAlerts] = useState([]);
   const [activeTab, setActiveTab] = useState('dashboard');
@@ -44,6 +43,8 @@ function App() {
   const [demographicsEnabled, setDemographicsEnabled] = useState(true);
   const [fireDetectionEnabled, setFireDetectionEnabled] = useState(true);
   const [fireAlerts, setFireAlerts] = useState([]);
+  const [harEnabled, setHarEnabled] = useState(true);            // NEW: HAR state
+  const [harAlerts, setHarAlerts] = useState([]);                 // NEW: HAR alerts
 
   // WebSocket connection
   useEffect(() => {
@@ -59,15 +60,13 @@ function App() {
         const data = JSON.parse(event.data);
         
         if (data.type === 'video_frame') {
-          // Update the videoFrame state for backward compatibility
+          // Update the videoFrame state
           setVideoFrame(data.frame);
           
-          // NEW: Update the cameras array for multi-camera view
-          // For now, update CAM-01 with your single camera
-          // Later you can modify your backend to send camera_id
+          // Update the cameras array for multi-camera view
           setCameras(prevCameras => 
             prevCameras.map(camera => 
-              camera.id === 'CAM-01' // or data.cameraId when you add it to backend
+              camera.id === 'CAM-01'
                 ? { 
                     ...camera, 
                     stream: `data:image/jpeg;base64,${data.frame}`,
@@ -85,7 +84,7 @@ function App() {
             data.face_results.forEach(result => {
               if (result.name === 'Unknown') {
                 newAlerts.push({
-                  cameraId: 'CAM-01', // or data.cameraId
+                  cameraId: 'CAM-01',
                   type: 'unauthorized',
                   severity: 'critical',
                   timestamp: new Date().toISOString(),
@@ -98,31 +97,78 @@ function App() {
           // Fire detection alerts
           if (data.fire_results && data.fire_results.length > 0) {
             newAlerts.push({
-              cameraId: 'CAM-01', // or data.cameraId
+              cameraId: 'CAM-01',
               type: 'fire',
               severity: 'critical',
               timestamp: new Date().toISOString(),
               description: 'Fire detected!'
             });
+            setFireAlerts(data.fire_results);
+          } else {
+            setFireAlerts([]);
           }
           
-          // License plate alerts
+          // NEW: Human Action Recognition alerts
+          if (data.har_results && data.har_results.length > 0) {
+            const harDetections = data.har_results.filter(r => r.class !== 'normal');
+            if (harDetections.length > 0) {
+              harDetections.forEach(det => {
+                newAlerts.push({
+                  cameraId: 'CAM-01',
+                  type: 'har',
+                  severity: det.severity || 'high',
+                  timestamp: new Date().toISOString(),
+                  description: `${det.action_label || det.class.toUpperCase()} detected (${(det.confidence * 100).toFixed(0)}% confidence)`
+                });
+              });
+              setHarAlerts(harDetections);
+            } else {
+              setHarAlerts([]);
+            }
+          } else {
+            setHarAlerts([]);
+          }
+          
+          // Update alerts
+          if (newAlerts.length > 0) {
+            setAlerts(prevAlerts => [...newAlerts, ...prevAlerts].slice(0, 100));
+          }
+          
+          // Update recent logs
+          const newLogs = [];
+          if (data.face_results) {
+            data.face_results.forEach(result => {
+              newLogs.push({
+                type: 'face',
+                ...result,
+                timestamp: data.timestamp
+              });
+            });
+          }
           if (data.plate_results) {
             data.plate_results.forEach(result => {
-              if (result.status === 'Unknown') {
-                newAlerts.push({
-                  cameraId: 'CAM-01', // or data.cameraId
-                  type: 'unauthorized',
-                  severity: 'high',
-                  timestamp: new Date().toISOString(),
-                  description: `Unregistered vehicle: ${result.text}`
+              newLogs.push({
+                type: 'plate',
+                ...result,
+                timestamp: data.timestamp
+              });
+            });
+          }
+          // NEW: HAR logs
+          if (data.har_results) {
+            data.har_results.forEach(result => {
+              if (result.class !== 'normal') {
+                newLogs.push({
+                  type: 'har',
+                  ...result,
+                  timestamp: data.timestamp
                 });
               }
             });
           }
           
-          if (newAlerts.length > 0) {
-            setAlerts(prev => [...newAlerts, ...prev]);
+          if (newLogs.length > 0) {
+            setRecentLogs(prevLogs => [...newLogs, ...prevLogs].slice(0, 200));
           }
         }
       };
@@ -148,7 +194,7 @@ function App() {
         ws.close();
       }
     };
-  }, []); // Remove ws from dependencies to avoid infinite loop
+  }, []);
 
   // Fetch system status
   const fetchStatus = useCallback(async () => {
@@ -156,25 +202,6 @@ function App() {
       const response = await fetch(`${API_BASE}/api/status`);
       const data = await response.json();
       setSystemStatus(data);
-      
-      // Update detection states if available
-      if (data.face_detection_enabled !== undefined) {
-        setFaceDetectionEnabled(data.face_detection_enabled);
-      }
-      
-      if (data.plate_detection_enabled !== undefined) {
-        setPlateDetectionEnabled(data.plate_detection_enabled);
-      }
-      
-      // Update demographics state if available
-      if (data.demographics_enabled !== undefined) {
-        setDemographicsEnabled(data.demographics_enabled);
-      }
-      
-      // Update fire detection state if available
-      if (data.fire_detection_enabled !== undefined) {
-        setFireDetectionEnabled(data.fire_detection_enabled);
-      }
     } catch (error) {
       console.error('Error fetching status:', error);
     }
@@ -182,7 +209,7 @@ function App() {
 
   useEffect(() => {
     fetchStatus();
-    const interval = setInterval(fetchStatus, 5000); // Update every 5 seconds
+    const interval = setInterval(fetchStatus, 5000);
     return () => clearInterval(interval);
   }, [fetchStatus]);
 
@@ -217,9 +244,7 @@ function App() {
     try {
       const response = await fetch(`${API_BASE}/api/face/toggle`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled })
       });
       const data = await response.json();
@@ -235,9 +260,7 @@ function App() {
     try {
       const response = await fetch(`${API_BASE}/api/plate/toggle`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled })
       });
       const data = await response.json();
@@ -253,9 +276,7 @@ function App() {
     try {
       const response = await fetch(`${API_BASE}/api/demographics/toggle`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled })
       });
       const data = await response.json();
@@ -271,9 +292,7 @@ function App() {
     try {
       const response = await fetch(`${API_BASE}/api/fire/toggle`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled })
       });
       const data = await response.json();
@@ -285,13 +304,28 @@ function App() {
     }
   };
 
+  // NEW: Toggle HAR
+  const toggleHar = async (enabled) => {
+    try {
+      const response = await fetch(`${API_BASE}/api/har/toggle`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled })
+      });
+      const data = await response.json();
+      console.log('HAR toggled:', data);
+      setHarEnabled(enabled);
+      fetchStatus();
+    } catch (error) {
+      console.error('Error toggling HAR:', error);
+    }
+  };
+
   const registerPerson = async (personData) => {
     try {
       const response = await fetch(`${API_BASE}/api/persons/register`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(personData)
       });
       const data = await response.json();
@@ -306,9 +340,7 @@ function App() {
     try {
       const response = await fetch(`${API_BASE}/api/plates/register`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(plateData)
       });
       const data = await response.json();
@@ -319,10 +351,11 @@ function App() {
     }
   };
 
-  // Make toggleDemographics available globally for the Dashboard component
+  // Make toggle functions available globally for Dashboard component
   useEffect(() => {
     window.toggleDemographics = toggleDemographics;
     window.toggleFireDetection = toggleFireDetection;
+    window.toggleHar = toggleHar;     // NEW
     
     // Request notification permission
     if ('Notification' in window && Notification.permission === 'default') {
@@ -332,6 +365,7 @@ function App() {
     return () => {
       delete window.toggleDemographics;
       delete window.toggleFireDetection;
+      delete window.toggleHar;
     };
   }, []);
 
@@ -355,10 +389,12 @@ function App() {
             onTogglePlateDetection={togglePlateDetection}
             onToggleDemographics={toggleDemographics}
             onToggleFireDetection={toggleFireDetection}
+            onToggleHar={toggleHar}                          // NEW
             faceDetectionEnabled={faceDetectionEnabled}
             plateDetectionEnabled={plateDetectionEnabled}
             demographicsEnabled={demographicsEnabled}
             fireDetectionEnabled={fireDetectionEnabled}
+            harEnabled={harEnabled}                          // NEW
           />
         )}
         {activeTab === 'person-reg' && (
@@ -385,6 +421,12 @@ function App() {
                   <span className="performance-stat-label">Demographics Analyzed</span>
                   <span className="performance-stat-value">
                     {systemStatus.performance.demographics_analyzed || 0}
+                  </span>
+                </div>
+                <div className="performance-stat">
+                  <span className="performance-stat-label">HAR Detections</span>
+                  <span className="performance-stat-value">
+                    {systemStatus.performance.har_detections || 0}
                   </span>
                 </div>
               </div>
