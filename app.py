@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
 Enhanced FastAPI Backend for Security System with Demographic Analysis
+and Human Action Recognition (HAR).
+
 Key features:
-1. Multi-threaded processing pipeline
+1. Multi-threaded processing pipeline (7 threads)
 2. Demographic analysis for unknown faces using DeepFace
-3. GPU-accelerated processing
-4. Improved queue management and result merging
+3. Human Action Recognition using SlowFast R50
+4. GPU-accelerated processing
+5. Improved queue management and result merging
 """
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
@@ -29,6 +32,7 @@ from license_plate_recognition_system import LicensePlateRecognitionSystem
 from database_manager import DatabaseManager
 from face_detection import YuNetFaceDetector
 from fire_detection_system import FireDetectionSystem
+from har_system import HumanActionRecognitionSystem
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -85,173 +89,94 @@ class FaceDemographicsAnalyzer:
         
         if self.enabled:
             # Start analysis thread
-            self.analysis_thread = threading.Thread(
-                target=self._analysis_worker, 
-                daemon=True, 
-                name="DemographicsAnalysisThread"
-            )
             self.is_running = True
+            self.analysis_thread = threading.Thread(
+                target=self._analysis_worker,
+                daemon=True,
+                name="DemographicsThread"
+            )
             self.analysis_thread.start()
-            logger.info("🧠 Demographics analysis thread started")
-
+            logger.info("✅ Demographics analysis thread started")
+    
     def _analysis_worker(self):
-        """Worker thread for demographic analysis"""
+        """Background thread for demographics analysis"""
         while self.is_running:
             try:
-                # Get analysis request from queue
-                request_id, face_image, face_bbox = self.analysis_queue.get(timeout=1.0)
+                request = self.analysis_queue.get(timeout=1.0)
+                request_id = request['request_id']
+                face_image = request['face_image']
                 
-                # Perform analysis
-                demographics = self._analyze_face_internal(face_image, face_bbox)
+                demographics = self._analyze_face(face_image)
                 
-                # Put result in results queue
-                try:
-                    self.results_queue.put((request_id, demographics), block=False)
-                except queue.Full:
-                    # Drop oldest result if queue is full
-                    try:
-                        self.results_queue.get(block=False)
-                        self.results_queue.put((request_id, demographics), block=False)
-                    except:
-                        pass
+                if demographics:
+                    with self.pending_lock:
+                        self.pending_demographics[request_id] = demographics
                         
             except queue.Empty:
                 continue
             except Exception as e:
                 logger.error(f"❌ Error in demographics worker: {e}")
-                time.sleep(0.1)
-
-    def _analyze_face_internal(self, face_image: np.ndarray, face_bbox: tuple) -> dict:
-        """Internal method to analyze face"""
+    
+    def request_analysis(self, face_image: np.ndarray, request_id: int):
+        """Queue a face image for demographics analysis"""
+        if not self.enabled:
+            return
+        
         try:
-            x, y, w, h = face_bbox
-            cache_key = f"{x}_{y}_{w}_{h}"
-            current_time = time.time()
+            self.analysis_queue.put({
+                'request_id': request_id,
+                'face_image': face_image.copy()
+            }, block=False)
+        except queue.Full:
+            pass
+    
+    def get_pending_result(self, request_id: int) -> Optional[Dict]:
+        """Get demographics result for a request_id if available"""
+        with self.pending_lock:
+            return self.pending_demographics.pop(request_id, None)
+    
+    def _analyze_face(self, face_image: np.ndarray) -> Dict:
+        """Analyze a face image for demographics"""
+        try:
+            if face_image is None or face_image.size == 0:
+                return {}
             
             # Check cache
-            if cache_key in self.last_analysis_cache:
-                last_time, last_result = self.last_analysis_cache[cache_key]
-                if current_time - last_time < self.cache_duration:
-                    return last_result
+            cache_key = hash(face_image.tobytes()[:1000])
+            current_time = time.time()
             
-            # Prepare image
-            if len(face_image.shape) == 3 and face_image.shape[2] == 3:
-                face_rgb = cv2.cvtColor(face_image, cv2.COLOR_BGR2RGB)
-            else:
-                face_rgb = face_image
-                
-            # Ensure minimum size for DeepFace
-            height, width = face_rgb.shape[:2]
-            if width < 48 or height < 48:
-                scale = max(48/width, 48/height)
-                new_width = int(width * scale)
-                new_height = int(height * scale)
-                face_rgb = cv2.resize(face_rgb, (new_width, new_height))
-
-            # Analyze with DeepFace
-            analysis = DeepFace.analyze(
-                img_path=face_rgb,
+            if cache_key in self.last_analysis_cache:
+                cached_time, cached_result = self.last_analysis_cache[cache_key]
+                if current_time - cached_time < self.cache_duration:
+                    return cached_result
+            
+            # Run DeepFace analysis
+            result = DeepFace.analyze(
+                face_image,
                 actions=['age', 'gender', 'emotion'],
                 enforce_detection=False,
                 silent=True
             )
             
-            # Extract results
-            if isinstance(analysis, list) and len(analysis) > 0:
-                result = analysis[0]
-            else:
-                result = analysis
-                
+            if isinstance(result, list):
+                result = result[0]
+            
             demographics = {
-                'age': int(result.get('age', 0)),
+                'age': result.get('age', 'unknown'),
                 'gender': result.get('dominant_gender', 'unknown'),
                 'emotion': result.get('dominant_emotion', 'unknown'),
                 'gender_confidence': result.get('gender', {}).get(result.get('dominant_gender', ''), 0),
                 'emotion_confidence': result.get('emotion', {}).get(result.get('dominant_emotion', ''), 0)
             }
 
-            # Cache result
             self.last_analysis_cache[cache_key] = (current_time, demographics)
             self._clean_cache(current_time)
             
             return demographics
             
         except Exception as e:
-            logger.debug(f"Demographics analysis error: {e}")
+            logger.error(f"❌ Error in face demographics analysis: {e}")
             return {}
-    
-    def analyze_face_async(self, face_image: np.ndarray, face_bbox: tuple, request_id: int) -> None:
-        """
-        Queue face for async demographic analysis
-        Non-blocking method for thread-safe analysis
-        """
-        if not self.enabled:
-            return
-        
-        try:
-            self.analysis_queue.put((request_id, face_image.copy(), face_bbox), block=False)
-        except queue.Full:
-            logger.debug("Demographics analysis queue full, skipping")
-    
-    def get_results(self, timeout: float = 0.01) -> Dict[int, dict]:
-        """
-        Get available analysis results and store them in pending_demographics
-        Returns: Dict of newly arrived results
-        """
-        new_results = {}
-        if not self.enabled:
-            return new_results
-        
-        end_time = time.time() + timeout
-        while time.time() < end_time:
-            try:
-                request_id, demographics = self.results_queue.get(block=False)
-                # Store in pending results with timestamp
-                with self.pending_lock:
-                    self.pending_demographics[request_id] = {
-                        'demographics': demographics,
-                        'timestamp': time.time()
-                    }
-                new_results[request_id] = demographics
-            except queue.Empty:
-                break
-        
-        return new_results
-    
-    def get_pending_result(self, request_id: int) -> Optional[dict]:
-        """
-        Get a pending demographics result by request_id
-        Returns the demographics dict if found, None otherwise
-        Does NOT remove the result from pending (allows multiple checks)
-        """
-        with self.pending_lock:
-            if request_id in self.pending_demographics:
-                return self.pending_demographics[request_id]['demographics']
-        return None
-    
-    def consume_pending_result(self, request_id: int) -> Optional[dict]:
-        """
-        Get and remove a pending demographics result by request_id
-        Use this when you've successfully matched and used a result
-        """
-        with self.pending_lock:
-            if request_id in self.pending_demographics:
-                result = self.pending_demographics[request_id]['demographics']
-                del self.pending_demographics[request_id]
-                return result
-        return None
-    
-    def cleanup_old_pending_results(self, max_age: float = 10.0):
-        """Remove pending results older than max_age seconds"""
-        current_time = time.time()
-        with self.pending_lock:
-            expired_ids = [
-                req_id for req_id, data in self.pending_demographics.items()
-                if current_time - data['timestamp'] > max_age
-            ]
-            for req_id in expired_ids:
-                del self.pending_demographics[req_id]
-                logger.debug(f"Cleaned up expired demographics result for request_id={req_id}")
     
     def _clean_cache(self, current_time):
         """Remove old cache entries"""
@@ -264,7 +189,7 @@ class FaceDemographicsAnalyzer:
             del self.last_analysis_cache[key]
     
     def stop(self):
-        """Stop the analysis thread"""
+        """Stop analysis thread"""
         self.is_running = False
         if hasattr(self, 'analysis_thread'):
             self.analysis_thread.join(timeout=2.0)
@@ -292,7 +217,7 @@ def convert_to_serializable(obj):
 
 class EnhancedSecuritySystemAPI:
     def __init__(self):
-        self.app = FastAPI(title="Security System API", version="3.0.0")
+        self.app = FastAPI(title="Security System API", version="4.0.0")
         self.setup_cors()
         self.setup_routes()
         
@@ -312,6 +237,31 @@ class EnhancedSecuritySystemAPI:
             logger.warning(f"⚠️ Fire detection system not available: {e}")
             self.fire_system = None
             self.fire_detection_enabled = False
+        
+        # Initialize Human Action Recognition system
+        har_model_path = "har/best_model.pth"
+        try:
+            import os
+            abs_path = os.path.abspath(har_model_path)
+            logger.info(f"🏃 Looking for HAR model at: {abs_path}")
+            self.har_system = HumanActionRecognitionSystem(
+                model_path=har_model_path,
+                device="auto",
+                confidence_threshold=0.5,
+                clip_interval_frames=30,
+            )
+            self.har_enabled = True
+            logger.info("✅ Human Action Recognition system initialized")
+        except FileNotFoundError as e:
+            logger.warning(f"⚠️ HAR model not found: {e}")
+            logger.warning(f"   Expected at: {os.path.abspath(har_model_path)}")
+            logger.warning(f"   Current working directory: {os.getcwd()}")
+            self.har_system = None
+            self.har_enabled = False
+        except Exception as e:
+            logger.warning(f"⚠️ HAR system not available: {type(e).__name__}: {e}")
+            self.har_system = None
+            self.har_enabled = False
         
         # Initialize demographics analyzer
         self.demographics_analyzer = FaceDemographicsAnalyzer()
@@ -333,9 +283,11 @@ class EnhancedSecuritySystemAPI:
         self.face_processing_queue = queue.Queue(maxsize=10)
         self.plate_processing_queue = queue.Queue(maxsize=10)
         self.fire_processing_queue = queue.Queue(maxsize=10)
+        self.har_processing_queue = queue.Queue(maxsize=10)      # NEW: HAR queue
         self.face_results_queue = queue.Queue(maxsize=10)
         self.plate_results_queue = queue.Queue(maxsize=10)
         self.fire_results_queue = queue.Queue(maxsize=10)
+        self.har_results_queue = queue.Queue(maxsize=10)          # NEW: HAR results queue
         self.processed_frame_queue = queue.Queue(maxsize=10)
         
         self.client_connections: List[WebSocket] = []
@@ -347,7 +299,7 @@ class EnhancedSecuritySystemAPI:
         self.demographics_request_id = 0
         
         # Track unknown faces across frames
-        self.unknown_faces_cache = {}  # key: bbox hash, value: {request_id, last_seen, demographics}
+        self.unknown_faces_cache = {}
         self.unknown_faces_lock = threading.Lock()
         
         # Statistics
@@ -357,6 +309,7 @@ class EnhancedSecuritySystemAPI:
             'face_detections': 0,
             'plate_detections': 0,
             'fire_detections': 0,
+            'har_detections': 0,          # NEW
             'frames_dropped': 0,
             'queue_skips': 0,
             'demographics_analyzed': 0,
@@ -382,13 +335,14 @@ class EnhancedSecuritySystemAPI:
         @self.app.get("/")
         async def root():
             return {
-                "message": "Security System API v3.0.0 (with Demographics)", 
+                "message": "Security System API v4.0.0 (with Demographics + HAR)", 
                 "status": "online",
                 "features": {
                     "face_recognition": True,
                     "license_plate_recognition": True,
                     "demographics_analysis": DEEPFACE_AVAILABLE,
-                    "fire_detection": self.fire_system is not None
+                    "fire_detection": self.fire_system is not None,
+                    "human_action_recognition": self.har_system is not None
                 }
             }
         
@@ -400,40 +354,26 @@ class EnhancedSecuritySystemAPI:
                 "streaming": self.is_streaming,
                 "face_detection_enabled": self.face_detection_enabled,
                 "plate_detection_enabled": self.plate_detection_enabled,
-                "demographics_enabled": self.demographics_enabled and DEEPFACE_AVAILABLE,
+                "demographics_enabled": self.demographics_enabled,
                 "fire_detection_enabled": self.fire_detection_enabled,
                 "fire_system_available": self.fire_system is not None,
-                "statistics": stats,
-                "connected_clients": len(self.client_connections),
-                "performance": {
-                    "frames_captured": self.stats['frames_captured'],
-                    "frames_processed": self.stats['frames_processed'],
-                    "face_detections": self.stats['face_detections'],
-                    "plate_detections": self.stats['plate_detections'],
-                    "fire_detections": self.stats['fire_detections'],
-                    "frames_dropped": self.stats['frames_dropped'],
-                    "queue_skips": self.stats['queue_skips'],
-                    "demographics_analyzed": self.stats['demographics_analyzed'],
-                    "unknown_faces": self.stats['unknown_faces']
-                }
+                "har_enabled": self.har_enabled,                         # NEW
+                "har_system_available": self.har_system is not None,     # NEW
+                "statistics": convert_to_serializable(stats),
+                "performance": convert_to_serializable(self.stats)
             }
         
         @self.app.post("/api/camera/start")
-        async def start_camera(camera_id: int = 0):
+        async def start_camera():
             try:
                 if not self.is_streaming:
-                    self.video_capture = cv2.VideoCapture(camera_id)
+                    self.video_capture = cv2.VideoCapture(0)
                     if self.video_capture.isOpened():
-                        self.video_capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-                        self.video_capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-                        self.video_capture.set(cv2.CAP_PROP_FPS, 30)
-                        self.video_capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                        
                         self.is_streaming = True
-                        logger.info(f"✅ Camera {camera_id} started successfully")
+                        logger.info("📹 Camera started")
                         return {"status": "success", "message": "Camera started"}
                     else:
-                        raise HTTPException(status_code=400, detail="Could not open camera")
+                        raise HTTPException(status_code=500, detail="Failed to open camera")
                 else:
                     return {"status": "info", "message": "Camera already running"}
             except Exception as e:
@@ -469,7 +409,7 @@ class EnhancedSecuritySystemAPI:
             """Toggle license plate detection on/off"""
             enabled = request.get("enabled", True)
             self.plate_detection_enabled = enabled
-            logger.info(f"� License plate detection: {'enabled' if enabled else 'disabled'}")
+            logger.info(f"🚗 License plate detection: {'enabled' if enabled else 'disabled'}")
             return {"status": "success", "plate_detection_enabled": self.plate_detection_enabled}
         
         @self.app.post("/api/demographics/toggle")
@@ -489,6 +429,36 @@ class EnhancedSecuritySystemAPI:
             self.fire_detection_enabled = enabled
             logger.info(f"🔥 Fire detection: {'enabled' if enabled else 'disabled'}")
             return {"status": "success", "fire_detection_enabled": self.fire_detection_enabled}
+        
+        # ── NEW: HAR toggle endpoint ──────────────────────────────────
+        @self.app.post("/api/har/toggle")
+        async def toggle_har(request: dict):
+            """Toggle Human Action Recognition on/off"""
+            enabled = request.get("enabled", True)
+            self.har_enabled = enabled
+            logger.info(f"🏃 Human Action Recognition: {'enabled' if enabled else 'disabled'}")
+            if self.har_system is None:
+                logger.warning("⚠️ HAR toggled but model is not loaded. "
+                               "Place your trained model at har/best_model.pth")
+                return {
+                    "status": "warning",
+                    "har_enabled": self.har_enabled,
+                    "message": "HAR toggled but model is not loaded. "
+                               "Place your trained model at har/best_model.pth and restart the server."
+                }
+            return {"status": "success", "har_enabled": self.har_enabled}
+        
+        # ── NEW: HAR statistics endpoint ──────────────────────────────
+        @self.app.get("/api/har/stats")
+        async def get_har_stats():
+            """Get HAR system statistics"""
+            if self.har_system is None:
+                return {"available": False, "message": "HAR system not loaded"}
+            return {
+                "available": True,
+                "enabled": self.har_enabled,
+                "statistics": convert_to_serializable(self.har_system.get_statistics())
+            }
         
         @self.app.post("/api/persons/register")
         async def register_person(person: PersonRegistration):
@@ -568,9 +538,9 @@ class EnhancedSecuritySystemAPI:
                     self.client_connections.remove(websocket)
     
     def setup_background_tasks(self):
-        """Setup multi-threaded processing pipeline with demographics"""
+        """Setup multi-threaded processing pipeline with demographics and HAR"""
         
-        # Thread 1: Video Capture
+        # ── Thread 1: Video Capture ───────────────────────────────────
         def capture_thread():
             """Capture frames and queue for processing"""
             logger.info("🎥 Thread 1: Video Capture started")
@@ -589,12 +559,12 @@ class EnhancedSecuritySystemAPI:
                             if self.frame_counter % self.frame_skip != 0:
                                 continue
                             
-                            # Track if frame was successfully queued for processing
                             queued_for_face = False
                             queued_for_plate = False
                             queued_for_fire = False
+                            queued_for_har = False   # NEW
                             
-                            # Try to queue for face processing
+                            # Queue for face processing
                             if self.face_detection_enabled:
                                 try:
                                     self.face_processing_queue.put((current_frame_id, frame.copy()), block=False)
@@ -604,7 +574,7 @@ class EnhancedSecuritySystemAPI:
                             else:
                                 queued_for_face = True
                             
-                            # Try to queue for plate processing
+                            # Queue for plate processing
                             if self.plate_detection_enabled:
                                 try:
                                     self.plate_processing_queue.put((current_frame_id, frame.copy()), block=False)
@@ -614,7 +584,7 @@ class EnhancedSecuritySystemAPI:
                             else:
                                 queued_for_plate = True
                             
-                            # Try to queue for fire detection (always if enabled)
+                            # Queue for fire detection
                             if self.fire_detection_enabled and self.fire_system:
                                 try:
                                     self.fire_processing_queue.put((current_frame_id, frame.copy()), block=False)
@@ -624,9 +594,18 @@ class EnhancedSecuritySystemAPI:
                             else:
                                 queued_for_fire = True
                             
-                            # Always add frame to raw queue if successfully queued for all enabled processing
-                            # If no detection is enabled, frames still go through
-                            if queued_for_face and queued_for_plate and queued_for_fire:
+                            # NEW: Queue for HAR processing
+                            if self.har_enabled and self.har_system:
+                                try:
+                                    self.har_processing_queue.put((current_frame_id, frame.copy()), block=False)
+                                    queued_for_har = True
+                                except queue.Full:
+                                    self.stats['queue_skips'] += 1
+                            else:
+                                queued_for_har = True
+                            
+                            # Add to raw queue if all enabled processors were fed
+                            if queued_for_face and queued_for_plate and queued_for_fire and queued_for_har:
                                 try:
                                     self.raw_frame_queue.put((current_frame_id, frame.copy()), block=False)
                                 except queue.Full:
@@ -643,7 +622,7 @@ class EnhancedSecuritySystemAPI:
                     logger.error(f"❌ Error in capture thread: {e}")
                     time.sleep(0.1)
         
-        # Thread 2: Enhanced Facial Recognition Processing with Demographics
+        # ── Thread 2: Facial Recognition + Demographics ───────────────
         def face_processing_thread():
             """Process frames for facial recognition and demographics"""
             logger.info("👤 Thread 2: Face Recognition + Demographics started")
@@ -654,138 +633,29 @@ class EnhancedSecuritySystemAPI:
                     
                     start_time = time.time()
                     
-                    # Process recognized faces
+                    # Process faces
                     processed_frame, face_results = self._process_faces(frame)
                     
-                    # If demographics enabled, analyze unknown faces
-                    if self.demographics_enabled and self.demographics_analyzer.enabled:
-                        # Detect ALL faces in the frame
-                        all_faces = self.face_detector.detect_faces(frame)
-                        
-                        # Get bounding boxes of recognized faces
-                        recognized_bboxes = [result['bbox'] for result in face_results if 'bbox' in result]
-                        
-                        logger.debug(f"🔍 Found {len(all_faces)} total faces, {len(recognized_bboxes)} recognized")
-                        
-                        # Find unknown faces
-                        unknown_faces = []
-                        for face_bbox in all_faces:
-                            is_recognized = False
-                            
-                            # Check if this face overlaps with any recognized face
-                            for recognized_bbox in recognized_bboxes:
-                                if self._bboxes_overlap(face_bbox, recognized_bbox):
-                                    is_recognized = True
-                                    break
-                            
-                            if not is_recognized:
-                                unknown_faces.append(face_bbox)
-                        
-                        if unknown_faces:
-                            logger.info(f"👤 Detected {len(unknown_faces)} unknown face(s)")
-                        
-                        # Queue unknown faces for demographic analysis
-                        for face_bbox in unknown_faces:
-                            x, y, w, h = face_bbox
-                            face_region = frame[y:y+h, x:x+w]
-                            
-                            if face_region.size > 0:
-                                # Check if we've seen this face before
-                                cached_entry, cache_key = self._find_matching_unknown_face(face_bbox)
-                                
-                                if cached_entry:
-                                    # Reuse existing request_id and demographics
-                                    request_id = cached_entry['request_id']
-                                    demographics = cached_entry.get('demographics', {})
-                                    
-                                    # Update last seen time
-                                    with self.unknown_faces_lock:
-                                        self.unknown_faces_cache[cache_key]['last_seen'] = time.time()
-                                        self.unknown_faces_cache[cache_key]['bbox'] = face_bbox
-                                    
-                                    logger.debug(f"🔄 Reusing request_id={request_id} for tracked unknown face")
-                                else:
-                                    # New unknown face - generate unique request ID
-                                    request_id = self.demographics_request_id
-                                    self.demographics_request_id += 1
-                                    demographics = {}
-                                    
-                                    # Queue for async analysis
-                                    self.demographics_analyzer.analyze_face_async(
-                                        face_region, face_bbox, request_id
-                                    )
-                                    
-                                    # Add to cache
-                                    bbox_key = self._get_bbox_key(face_bbox)
-                                    with self.unknown_faces_lock:
-                                        self.unknown_faces_cache[bbox_key] = {
-                                            'request_id': request_id,
-                                            'bbox': face_bbox,
-                                            'last_seen': time.time(),
-                                            'demographics': {}
-                                        }
-                                    
-                                    logger.debug(f"🆕 New unknown face with request_id={request_id}")
-                                    self.stats['unknown_faces'] += 1
-                                
-                                # Add result for unknown face
-                                unknown_result = {
-                                    'name': 'Unknown',
-                                    'employee_id': '',
-                                    'department': '',
-                                    'confidence': 0.0,
-                                    'bbox': face_bbox,
-                                    'timestamp': datetime.now(),
-                                    'demographics_request_id': request_id,
-                                    'age': demographics.get('age', ''),
-                                    'gender': demographics.get('gender', ''),
-                                    'emotion': demographics.get('emotion', '')
-                                }
-                                face_results.append(unknown_result)
-                        
-                        # Check for newly completed demographic analyses
-                        # This collects results from the queue and stores them in pending_demographics
-                        demographics_results = self.demographics_analyzer.get_results(timeout=0.01)
-                        
-                        # Update face results with demographics (check both new and pending results)
+                    # Demographics for unknown faces
+                    if self.demographics_enabled and face_results:
                         for result in face_results:
-                            if 'demographics_request_id' in result:
-                                req_id = result['demographics_request_id']
-                                
-                                # First check newly arrived results
-                                demographics = None
-                                if req_id in demographics_results:
-                                    demographics = demographics_results[req_id]
-                                else:
-                                    # Check pending results from previous frames
-                                    demographics = self.demographics_analyzer.get_pending_result(req_id)
-                                
-                                if demographics:
-                                    result.update({
-                                        'age': demographics.get('age', ''),
-                                        'gender': demographics.get('gender', ''),
-                                        'emotion': demographics.get('emotion', '')
-                                    })
-                                    
-                                    logger.info(f"✅ Applied demographics for request_id={req_id}: Age={demographics.get('age')}, Gender={demographics.get('gender')}, Emotion={demographics.get('emotion')}")
-                                    
-                                    # Update the cache so future frames can reuse this data
-                                    bbox = result.get('bbox')
-                                    if bbox:
+                            if result.get('name') == 'Unknown':
+                                self.stats['unknown_faces'] += 1
+                                bbox = result.get('bbox', result.get('bounding_box', None))
+                                if bbox:
+                                    x, y, w, h = bbox
+                                    face_crop = frame[max(0,y):y+h, max(0,x):x+w]
+                                    if face_crop.size > 0:
+                                        self.demographics_request_id += 1
+                                        req_id = self.demographics_request_id
+                                        self.demographics_analyzer.request_analysis(face_crop, req_id)
+                                        
+                                        # Try to get cached demographics
                                         bbox_key = self._get_bbox_key(bbox)
-                                        with self.unknown_faces_lock:
-                                            if bbox_key in self.unknown_faces_cache:
-                                                self.unknown_faces_cache[bbox_key]['demographics'] = demographics
-                                    
-                                    self.stats['demographics_analyzed'] += 1
-                        
-                        # Periodically clean up old cached unknown faces and pending results
-                        if self.frame_id % 100 == 0:
-                            self.demographics_analyzer.cleanup_old_pending_results(max_age=10.0)
-                            self._cleanup_old_unknown_faces(max_age=5.0)
-                        
-                        # Draw demographics on frame for unknown faces
-                        processed_frame = self._draw_demographics_on_frame(processed_frame, face_results)
+                                        cached, _ = self._find_matching_unknown_face(bbox)
+                                        if cached and cached.get('demographics'):
+                                            result.update(cached['demographics'])
+                                            self.stats['demographics_analyzed'] += 1
                     
                     processing_time = time.time() - start_time
                     
@@ -808,7 +678,7 @@ class EnhancedSecuritySystemAPI:
                     logger.error(f"❌ Error in face processing thread: {e}")
                     time.sleep(0.1)
         
-        # Thread 3: License Plate Recognition Processing
+        # ── Thread 3: License Plate Recognition ───────────────────────
         def plate_processing_thread():
             """Process frames for license plate recognition"""
             logger.info("🚗 Thread 3: License Plate Recognition started")
@@ -840,7 +710,7 @@ class EnhancedSecuritySystemAPI:
                     logger.error(f"❌ Error in plate processing thread: {e}")
                     time.sleep(0.1)
         
-        # Thread 4: Fire Detection Processing
+        # ── Thread 4: Fire Detection Processing ───────────────────────
         def fire_processing_thread():
             """Process frames for fire and smoke detection"""
             logger.info("🔥 Thread 4: Fire Detection started")
@@ -860,7 +730,6 @@ class EnhancedSecuritySystemAPI:
                         self.stats['fire_detections'] += len(fire_results)
                         logger.debug(f"🔥 Detected {len(fire_results)} fire/smoke in {processing_time:.3f}s")
                         
-                        # Log critical alerts
                         critical = [r for r in fire_results if r.get('severity') == 'critical']
                         if critical:
                             logger.warning(f"🚨 CRITICAL FIRE ALERT! {len(critical)} critical detection(s)")
@@ -880,16 +749,61 @@ class EnhancedSecuritySystemAPI:
                     logger.error(f"❌ Error in fire processing thread: {e}")
                     time.sleep(0.1)
         
-        # Thread 5: Results Merging and Frame Encoding
+        # ── Thread 5: Human Action Recognition Processing ─────────────
+        def har_processing_thread():
+            """Process frames for human action recognition (SlowFast)"""
+            logger.info("🏃 Thread 5: Human Action Recognition started")
+            
+            while True:
+                try:
+                    frame_id, frame = self.har_processing_queue.get(timeout=1.0)
+                    
+                    if not self.har_enabled or not self.har_system:
+                        continue
+                    
+                    start_time = time.time()
+                    har_results = self.har_system.process_frame(frame)
+                    processing_time = time.time() - start_time
+                    
+                    if har_results:
+                        # Only count non-normal detections for stats
+                        non_normal = [r for r in har_results if r.get('class') != 'normal']
+                        if non_normal:
+                            self.stats['har_detections'] += len(non_normal)
+                            logger.debug(f"🏃 HAR: {non_normal[0]['class']} "
+                                         f"({non_normal[0]['confidence']:.2f}) in {processing_time:.3f}s")
+                        
+                        critical = [r for r in har_results if r.get('severity') == 'critical']
+                        if critical:
+                            logger.warning(f"🚨 CRITICAL HAR ALERT! "
+                                           f"{critical[0]['action_label']} detected!")
+                    
+                    try:
+                        self.har_results_queue.put((frame_id, har_results), block=False)
+                    except queue.Full:
+                        try:
+                            self.har_results_queue.get(block=False)
+                            self.har_results_queue.put((frame_id, har_results), block=False)
+                        except:
+                            pass
+                    
+                except queue.Empty:
+                    continue
+                except Exception as e:
+                    logger.error(f"❌ Error in HAR processing thread: {e}")
+                    time.sleep(0.1)
+        
+        # ── Thread 6: Results Merging and Frame Encoding ──────────────
         def merging_thread():
-            """Merge results from face, plate, and fire processing"""
-            logger.info("🔄 Thread 5: Results Merging started")
+            """Merge results from face, plate, fire, and HAR processing"""
+            logger.info("🔄 Thread 6: Results Merging started")
             
             pending_results = {
                 'frames': {},
                 'face': {},
                 'plate': {},
-                'fire': {}
+                'fire': {},
+                'har': {},   # NEW
             }
             
             while True:
@@ -902,7 +816,7 @@ class EnhancedSecuritySystemAPI:
                     except queue.Empty:
                         pass
                     
-                    # Collect face results if face detection is enabled
+                    # Collect face results
                     if self.face_detection_enabled:
                         try:
                             while True:
@@ -911,7 +825,7 @@ class EnhancedSecuritySystemAPI:
                         except queue.Empty:
                             pass
                     
-                    # Collect plate results if plate detection is enabled
+                    # Collect plate results
                     if self.plate_detection_enabled:
                         try:
                             while True:
@@ -920,12 +834,21 @@ class EnhancedSecuritySystemAPI:
                         except queue.Empty:
                             pass
                     
-                    # Collect fire detection results if fire detection is enabled
+                    # Collect fire results
                     if self.fire_detection_enabled and self.fire_system:
                         try:
                             while True:
                                 frame_id, fire_results = self.fire_results_queue.get(block=False)
                                 pending_results['fire'][frame_id] = fire_results
+                        except queue.Empty:
+                            pass
+                    
+                    # NEW: Collect HAR results
+                    if self.har_enabled and self.har_system:
+                        try:
+                            while True:
+                                frame_id, har_results = self.har_results_queue.get(block=False)
+                                pending_results['har'][frame_id] = har_results
                         except queue.Empty:
                             pass
                     
@@ -936,18 +859,18 @@ class EnhancedSecuritySystemAPI:
                         should_process = False
                         use_timeout = self._is_frame_too_old(frame_id, max_age=60)
                         
-                        # Determine if we should process this frame
-                        # Check if all ENABLED detections have results or timeout occurred
                         expected_results_ready = True
                         
                         if self.face_detection_enabled:
-                            expected_results_ready = expected_results_ready and (frame_id in pending_results['face'] or use_timeout)
+                            expected_results_ready = expected_results_ready and (
+                                frame_id in pending_results['face'] or use_timeout)
                         
                         if self.plate_detection_enabled:
-                            expected_results_ready = expected_results_ready and (frame_id in pending_results['plate'] or use_timeout)
+                            expected_results_ready = expected_results_ready and (
+                                frame_id in pending_results['plate'] or use_timeout)
                         
-                        # Fire detection results are optional (merged when available)
-                        # If no detection is enabled, process immediately
+                        # Fire and HAR results are optional (merged when available)
+                        
                         if not self.face_detection_enabled and not self.plate_detection_enabled:
                             should_process = True
                         else:
@@ -959,30 +882,40 @@ class EnhancedSecuritySystemAPI:
                             face_results = []
                             plate_results = []
                             fire_results = []
+                            har_results = []       # NEW
                             final_frame = frame.copy()
                             
-                            # Get face results if available
+                            # Get face results
                             if frame_id in pending_results['face']:
                                 processed_frame, face_results = pending_results['face'].pop(frame_id)
                                 final_frame = processed_frame
                             
-                            # Get plate results and draw if available
+                            # Get plate results and draw
                             if frame_id in pending_results['plate']:
                                 plate_results = pending_results['plate'].pop(frame_id)
                                 if plate_results:
                                     final_frame = self.plate_system.draw_outputs(final_frame, plate_results)
                             
-                            # Get fire results and draw if available
+                            # Get fire results and draw
                             if frame_id in pending_results['fire']:
                                 fire_results = pending_results['fire'].pop(frame_id)
                                 if fire_results:
                                     final_frame = self.fire_system.draw_detections(final_frame, fire_results)
                             
+                            # NEW: Get HAR results and draw
+                            if frame_id in pending_results['har']:
+                                har_results = pending_results['har'].pop(frame_id)
+                                if har_results:
+                                    final_frame = self.har_system.draw_detections(final_frame, har_results)
+                            
                             # Encode and queue for sending
-                            self._encode_and_queue_frame(final_frame, face_results, plate_results, fire_results)
+                            self._encode_and_queue_frame(
+                                final_frame, face_results, plate_results,
+                                fire_results, har_results
+                            )
                             self.stats['frames_processed'] += 1
                     
-                    # Clean up old cached results
+                    # Clean up old results
                     current_frame_id = self.frame_id
                     self._cleanup_old_results(pending_results, current_frame_id, max_age=90)
                     
@@ -998,6 +931,7 @@ class EnhancedSecuritySystemAPI:
             threading.Thread(target=face_processing_thread, daemon=True, name="FaceProcessingThread"),
             threading.Thread(target=plate_processing_thread, daemon=True, name="PlateProcessingThread"),
             threading.Thread(target=fire_processing_thread, daemon=True, name="FireProcessingThread"),
+            threading.Thread(target=har_processing_thread, daemon=True, name="HARProcessingThread"),     # NEW
             threading.Thread(target=merging_thread, daemon=True, name="MergingThread")
         ]
         
@@ -1026,16 +960,12 @@ class EnhancedSecuritySystemAPI:
         x1, y1, w1, h1 = bbox1
         x2, y2, w2, h2 = bbox2
         
-        # Calculate overlap area
         x_overlap = max(0, min(x1 + w1, x2 + w2) - max(x1, x2))
         y_overlap = max(0, min(y1 + h1, y2 + h2) - max(y1, y2))
         overlap_area = x_overlap * y_overlap
         
-        # Calculate areas
         area1 = w1 * h1
         area2 = w2 * h2
-        
-        # Calculate IoU
         union_area = area1 + area2 - overlap_area
         
         if union_area == 0:
@@ -1045,205 +975,44 @@ class EnhancedSecuritySystemAPI:
         return iou > threshold
     
     def _get_bbox_key(self, bbox, grid_size=50):
-        """
-        Generate a key for bbox to track same face across frames
-        Uses grid-based hashing for approximate location matching
-        """
+        """Generate a key for bbox to track same face across frames"""
         x, y, w, h = bbox
         center_x = x + w // 2
         center_y = y + h // 2
-        
-        # Grid-based key to allow some movement
         grid_x = center_x // grid_size
         grid_y = center_y // grid_size
-        
         return f"{grid_x}_{grid_y}_{w//10}_{h//10}"
     
     def _find_matching_unknown_face(self, bbox):
-        """
-        Find if this bbox matches a previously detected unknown face
-        Returns (matched_cache_entry, cache_key) or (None, None)
-        """
+        """Find if this bbox matches a previously detected unknown face"""
         with self.unknown_faces_lock:
             bbox_key = self._get_bbox_key(bbox)
             
-            # Check exact match first
             if bbox_key in self.unknown_faces_cache:
-                cache_entry = self.unknown_faces_cache[bbox_key]
-                # Only reuse if seen recently (within 2 seconds)
-                if time.time() - cache_entry['last_seen'] < 2.0:
-                    return cache_entry, bbox_key
+                entry = self.unknown_faces_cache[bbox_key]
+                return entry, bbox_key
             
-            # Check nearby grid cells for similar faces
-            x, y, w, h = bbox
-            for dx in [-1, 0, 1]:
-                for dy in [-1, 0, 1]:
-                    if dx == 0 and dy == 0:
-                        continue
-                    
-                    test_bbox = (x + dx*50, y + dy*50, w, h)
-                    test_key = self._get_bbox_key(test_bbox)
-                    
-                    if test_key in self.unknown_faces_cache:
-                        cache_entry = self.unknown_faces_cache[test_key]
-                        if time.time() - cache_entry['last_seen'] < 2.0:
-                            # Verify they actually overlap
-                            if self._bboxes_overlap(bbox, cache_entry['bbox'], threshold=0.3):
-                                return cache_entry, test_key
-            
-            return None, None
-    
-    def _draw_demographics_on_frame(self, frame, face_results):
-        """Draw demographics information on frame for unknown faces"""
-        output = frame.copy()
+            # Check neighbours
+            for key, entry in self.unknown_faces_cache.items():
+                if entry.get('bbox') and self._bboxes_overlap(bbox, entry['bbox'], threshold=0.3):
+                    return entry, key
         
-        for result in face_results:
-            # Only draw demographics for unknown faces
-            if result.get('name') == 'Unknown':
-                bbox = result.get('bbox')
-                if bbox:
-                    x, y, w, h = bbox
-                    
-                    # Draw RED bounding box for unknown faces
-                    cv2.rectangle(output, (x, y), (x + w, y + h), (0, 0, 255), 2)
-                    
-                    # Draw "Unknown" label at the top
-                    label_text = "Unknown"
-                    (label_width, label_height), _ = cv2.getTextSize(
-                        label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1
-                    )
-                    
-                    # Draw background for "Unknown" label
-                    cv2.rectangle(
-                        output,
-                        (x, y - label_height - 4),
-                        (x + label_width, y),
-                        (0, 0, 255),
-                        -1
-                    )
-                    
-                    # Draw "Unknown" text
-                    cv2.putText(
-                        output,
-                        label_text,
-                        (x, y - 2),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5,
-                        (255, 255, 255),
-                        1
-                    )
-                    
-                    # Get demographics - check if analysis is complete
-                    age = result.get('age', '')
-                    gender = result.get('gender', '')
-                    emotion = result.get('emotion', '')
-                    
-                    # Prepare labels
-                    labels = []
-                    
-                    # Always show demographic info or "Analyzing..." status
-                    if age and gender and emotion:
-                        # All demographics available
-                        labels.append(f"Age: {age}")
-                        labels.append(f"Gender: {gender}")
-                        labels.append(f"Emotion: {emotion}")
-                    elif age or gender or emotion:
-                        # Partial demographics available
-                        if age:
-                            labels.append(f"Age: {age}")
-                        if gender:
-                            labels.append(f"Gender: {gender}")
-                        if emotion:
-                            labels.append(f"Emotion: {emotion}")
-                    else:
-                        # No demographics yet - show analyzing status
-                        labels.append("Analyzing...")
-                    
-                    if labels:
-                        # Draw background rectangle for text
-                        font = cv2.FONT_HERSHEY_SIMPLEX
-                        font_scale = 0.5
-                        font_thickness = 1
-                        padding = 5
-                        line_height = 20
-                        
-                        # Calculate background size
-                        max_width = 0
-                        for label in labels:
-                            (text_width, text_height), _ = cv2.getTextSize(
-                                label, font, font_scale, font_thickness
-                            )
-                            max_width = max(max_width, text_width)
-                        
-                        bg_height = len(labels) * line_height + padding * 2
-                        bg_width = max_width + padding * 2
-                        
-                        # Position below the face box
-                        text_x = x
-                        text_y = y + h + 5
-                        
-                        # Ensure text stays within frame bounds
-                        if text_y + bg_height > output.shape[0]:
-                            text_y = y - bg_height - 5
-                        if text_x + bg_width > output.shape[1]:
-                            text_x = output.shape[1] - bg_width - 5
-                        
-                        # Draw semi-transparent background
-                        overlay = output.copy()
-                        cv2.rectangle(
-                            overlay,
-                            (text_x, text_y),
-                            (text_x + bg_width, text_y + bg_height),
-                            (0, 0, 0),
-                            -1
-                        )
-                        cv2.addWeighted(overlay, 0.6, output, 0.4, 0, output)
-                        
-                        # Draw each label
-                        for i, label in enumerate(labels):
-                            y_offset = text_y + padding + (i + 1) * line_height - 5
-                            # Use different color for "Analyzing..." 
-                            color = (128, 128, 128) if label == "Analyzing..." else (0, 255, 255)  # Gray for analyzing, Yellow for results
-                            cv2.putText(
-                                output,
-                                label,
-                                (text_x + padding, y_offset),
-                                font,
-                                font_scale,
-                                color,
-                                font_thickness
-                            )
-        
-        return output
-    
-    def _cleanup_old_unknown_faces(self, max_age: float = 5.0):
-        """Remove old unknown face cache entries"""
-        current_time = time.time()
-        with self.unknown_faces_lock:
-            keys_to_remove = [
-                key for key, entry in self.unknown_faces_cache.items()
-                if current_time - entry['last_seen'] > max_age
-            ]
-            for key in keys_to_remove:
-                del self.unknown_faces_cache[key]
-            
-            if keys_to_remove:
-                logger.debug(f"🧹 Cleaned up {len(keys_to_remove)} old unknown face cache entries")
+        return None, None
     
     def _is_frame_too_old(self, frame_id: int, max_age: int = 60) -> bool:
         """Check if frame is too old to wait for results"""
-        current_frame_id = self.frame_id
-        return (current_frame_id - frame_id) > max_age
+        return (self.frame_id - frame_id) > max_age
     
     def _cleanup_old_results(self, pending_results: Dict, current_frame_id: int, max_age: int = 90):
         """Remove old cached results"""
-        for result_type in ['frames', 'face', 'plate', 'fire']:
+        for result_type in ['frames', 'face', 'plate', 'fire', 'har']:
             old_frame_ids = [fid for fid in pending_results[result_type].keys() 
                            if (current_frame_id - fid) > max_age]
             for fid in old_frame_ids:
                 pending_results[result_type].pop(fid, None)
     
-    def _encode_and_queue_frame(self, frame, face_results, plate_results, fire_results=None):
+    def _encode_and_queue_frame(self, frame, face_results, plate_results,
+                                 fire_results=None, har_results=None):
         """Encode frame to JPEG and add to output queue"""
         try:
             height, width = frame.shape[:2]
@@ -1263,9 +1032,11 @@ class EnhancedSecuritySystemAPI:
                 "face_results": convert_to_serializable(face_results),
                 "plate_results": convert_to_serializable(plate_results),
                 "fire_results": convert_to_serializable(fire_results) if fire_results else [],
+                "har_results": convert_to_serializable(har_results) if har_results else [],   # NEW
                 "timestamp": datetime.now().isoformat(),
                 "demographics_enabled": self.demographics_enabled,
-                "fire_detection_enabled": self.fire_detection_enabled
+                "fire_detection_enabled": self.fire_detection_enabled,
+                "har_enabled": self.har_enabled,                                                # NEW
             }
             
             try:
@@ -1287,9 +1058,11 @@ class EnhancedSecuritySystemAPI:
             self.face_processing_queue,
             self.plate_processing_queue,
             self.fire_processing_queue,
+            self.har_processing_queue,       # NEW
             self.face_results_queue,
             self.plate_results_queue,
             self.fire_results_queue,
+            self.har_results_queue,           # NEW
             self.processed_frame_queue
         ]
         
@@ -1312,17 +1085,18 @@ app = security_api.app
 
 if __name__ == "__main__":
     import uvicorn
-    logger.info("🔒 Starting Enhanced Security System API v3.0.0...")
+    logger.info("🔒 Starting Enhanced Security System API v4.0.0...")
     logger.info("📡 API: http://localhost:8000")
     logger.info("🔌 WebSocket: ws://localhost:8000/ws")
     logger.info("📚 Docs: http://localhost:8000/docs")
-    logger.info("🧵 Multi-threaded processing: 6 threads")
+    logger.info("🧵 Multi-threaded processing: 7 threads")
     logger.info("   - Thread 1: Video Capture")
     logger.info("   - Thread 2: Facial Recognition + Demographics")
     logger.info("   - Thread 3: License Plate Recognition")
     logger.info("   - Thread 4: Fire & Smoke Detection")
-    logger.info("   - Thread 5: Results Merging")
-    logger.info("   - Thread 6: Demographics Analysis (DeepFace)")
+    logger.info("   - Thread 5: Human Action Recognition (SlowFast)")
+    logger.info("   - Thread 6: Results Merging")
+    logger.info("   - Thread 7: Demographics Analysis (DeepFace)")
     
     if DEEPFACE_AVAILABLE:
         logger.info("✅ DeepFace enabled - demographics analysis available")
