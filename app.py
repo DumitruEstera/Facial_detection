@@ -33,6 +33,7 @@ from database_manager import DatabaseManager
 from face_detection import YuNetFaceDetector
 from fire_detection_system import FireDetectionSystem
 from har_system import HumanActionRecognitionSystem
+from weapon_detection_system import WeaponDetectionSystem
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -48,6 +49,10 @@ except ImportError:
     logger.warning("⚠️ DeepFace not available - demographic analysis disabled")
 
 # Pydantic models
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
 class PersonRegistration(BaseModel):
     name: str
     employee_id: str
@@ -61,6 +66,11 @@ class LicensePlateRegistration(BaseModel):
     owner_id: Optional[str] = None
     is_authorized: bool = True
     notes: Optional[str] = None
+
+# Simple user credentials for dashboard login
+DASHBOARD_USERS = {
+    "admin": "admin123",
+}
 
 # Database configuration
 DB_CONFIG = {
@@ -263,6 +273,21 @@ class EnhancedSecuritySystemAPI:
             self.har_system = None
             self.har_enabled = False
         
+        # Initialize Weapon Detection system
+        weapon_model_path = "weapon_detection_model/best.pt"
+        try:
+            self.weapon_system = WeaponDetectionSystem(model_path=weapon_model_path)
+            self.weapon_detection_enabled = True
+            logger.info("✅ Weapon detection system initialized")
+        except FileNotFoundError as e:
+            logger.warning(f"⚠️ Weapon detection model not found: {e}")
+            self.weapon_system = None
+            self.weapon_detection_enabled = False
+        except Exception as e:
+            logger.warning(f"⚠️ Weapon detection system not available: {type(e).__name__}: {e}")
+            self.weapon_system = None
+            self.weapon_detection_enabled = False
+
         # Initialize demographics analyzer
         self.demographics_analyzer = FaceDemographicsAnalyzer()
         self.demographics_enabled = True
@@ -284,10 +309,12 @@ class EnhancedSecuritySystemAPI:
         self.plate_processing_queue = queue.Queue(maxsize=10)
         self.fire_processing_queue = queue.Queue(maxsize=10)
         self.har_processing_queue = queue.Queue(maxsize=10)      # NEW: HAR queue
+        self.weapon_processing_queue = queue.Queue(maxsize=10)   # Weapon queue
         self.face_results_queue = queue.Queue(maxsize=10)
         self.plate_results_queue = queue.Queue(maxsize=10)
         self.fire_results_queue = queue.Queue(maxsize=10)
         self.har_results_queue = queue.Queue(maxsize=10)          # NEW: HAR results queue
+        self.weapon_results_queue = queue.Queue(maxsize=10)       # Weapon results queue
         self.processed_frame_queue = queue.Queue(maxsize=10)
         
         self.client_connections: List[WebSocket] = []
@@ -310,6 +337,7 @@ class EnhancedSecuritySystemAPI:
             'plate_detections': 0,
             'fire_detections': 0,
             'har_detections': 0,          # NEW
+            'weapon_detections': 0,
             'frames_dropped': 0,
             'queue_skips': 0,
             'demographics_analyzed': 0,
@@ -331,7 +359,22 @@ class EnhancedSecuritySystemAPI:
         
     def setup_routes(self):
         """Setup API routes"""
-        
+
+        @self.app.post("/api/login")
+        async def login(credentials: LoginRequest):
+            """Authenticate user for dashboard access"""
+            if (credentials.username in DASHBOARD_USERS and
+                    DASHBOARD_USERS[credentials.username] == credentials.password):
+                logger.info(f"✅ User '{credentials.username}' logged in")
+                return {
+                    "status": "success",
+                    "user": {
+                        "username": credentials.username,
+                        "role": "administrator"
+                    }
+                }
+            raise HTTPException(status_code=401, detail="Invalid username or password")
+
         @self.app.get("/")
         async def root():
             return {
@@ -342,7 +385,8 @@ class EnhancedSecuritySystemAPI:
                     "license_plate_recognition": True,
                     "demographics_analysis": DEEPFACE_AVAILABLE,
                     "fire_detection": self.fire_system is not None,
-                    "human_action_recognition": self.har_system is not None
+                    "human_action_recognition": self.har_system is not None,
+                    "weapon_detection": self.weapon_system is not None
                 }
             }
         
@@ -359,6 +403,8 @@ class EnhancedSecuritySystemAPI:
                 "fire_system_available": self.fire_system is not None,
                 "har_enabled": self.har_enabled,                         # NEW
                 "har_system_available": self.har_system is not None,     # NEW
+                "weapon_detection_enabled": self.weapon_detection_enabled,
+                "weapon_system_available": self.weapon_system is not None,
                 "statistics": convert_to_serializable(stats),
                 "performance": convert_to_serializable(self.stats)
             }
@@ -460,6 +506,35 @@ class EnhancedSecuritySystemAPI:
                 "statistics": convert_to_serializable(self.har_system.get_statistics())
             }
         
+        # ── Weapon Detection toggle endpoint ─────────────────────
+        @self.app.post("/api/weapon/toggle")
+        async def toggle_weapon_detection(request: dict):
+            """Toggle Weapon Detection on/off"""
+            enabled = request.get("enabled", True)
+            self.weapon_detection_enabled = enabled
+            logger.info(f"🔫 Weapon Detection: {'enabled' if enabled else 'disabled'}")
+            if self.weapon_system is None:
+                logger.warning("⚠️ Weapon detection toggled but model is not loaded.")
+                return {
+                    "status": "warning",
+                    "weapon_detection_enabled": self.weapon_detection_enabled,
+                    "message": "Weapon detection toggled but model is not loaded. "
+                               "Place your trained model at weapon_detection_model/best.pt and restart the server."
+                }
+            return {"status": "success", "weapon_detection_enabled": self.weapon_detection_enabled}
+
+        # ── Weapon Detection statistics endpoint ──────────────────
+        @self.app.get("/api/weapon/stats")
+        async def get_weapon_stats():
+            """Get Weapon Detection system statistics"""
+            if self.weapon_system is None:
+                return {"available": False, "message": "Weapon detection system not loaded"}
+            return {
+                "available": True,
+                "enabled": self.weapon_detection_enabled,
+                "statistics": convert_to_serializable(self.weapon_system.get_statistics())
+            }
+
         @self.app.post("/api/persons/register")
         async def register_person(person: PersonRegistration):
             try:
@@ -563,7 +638,8 @@ class EnhancedSecuritySystemAPI:
                             queued_for_plate = False
                             queued_for_fire = False
                             queued_for_har = False   # NEW
-                            
+                            queued_for_weapon = False
+
                             # Queue for face processing
                             if self.face_detection_enabled:
                                 try:
@@ -603,9 +679,19 @@ class EnhancedSecuritySystemAPI:
                                     self.stats['queue_skips'] += 1
                             else:
                                 queued_for_har = True
-                            
+
+                            # Queue for weapon detection
+                            if self.weapon_detection_enabled and self.weapon_system:
+                                try:
+                                    self.weapon_processing_queue.put((current_frame_id, frame.copy()), block=False)
+                                    queued_for_weapon = True
+                                except queue.Full:
+                                    self.stats['queue_skips'] += 1
+                            else:
+                                queued_for_weapon = True
+
                             # Add to raw queue if all enabled processors were fed
-                            if queued_for_face and queued_for_plate and queued_for_fire and queued_for_har:
+                            if queued_for_face and queued_for_plate and queued_for_fire and queued_for_har and queued_for_weapon:
                                 try:
                                     self.raw_frame_queue.put((current_frame_id, frame.copy()), block=False)
                                 except queue.Full:
@@ -793,7 +879,46 @@ class EnhancedSecuritySystemAPI:
                     logger.error(f"❌ Error in HAR processing thread: {e}")
                     time.sleep(0.1)
         
-        # ── Thread 6: Results Merging and Frame Encoding ──────────────
+        # ── Thread 6: Weapon Detection Processing ────────────────────
+        def weapon_processing_thread():
+            """Process frames for weapon detection"""
+            logger.info("🔫 Thread 6: Weapon Detection started")
+
+            while True:
+                try:
+                    frame_id, frame = self.weapon_processing_queue.get(timeout=1.0)
+
+                    if not self.weapon_detection_enabled or not self.weapon_system:
+                        continue
+
+                    start_time = time.time()
+                    weapon_results = self.weapon_system.process_frame(frame)
+                    processing_time = time.time() - start_time
+
+                    if weapon_results:
+                        self.stats['weapon_detections'] += len(weapon_results)
+                        logger.debug(f"🔫 Detected {len(weapon_results)} weapon(s) in {processing_time:.3f}s")
+
+                        critical = [r for r in weapon_results if r.get('severity') == 'critical']
+                        if critical:
+                            logger.warning(f"🚨 CRITICAL WEAPON ALERT! {len(critical)} critical detection(s)")
+
+                    try:
+                        self.weapon_results_queue.put((frame_id, weapon_results), block=False)
+                    except queue.Full:
+                        try:
+                            self.weapon_results_queue.get(block=False)
+                            self.weapon_results_queue.put((frame_id, weapon_results), block=False)
+                        except:
+                            pass
+
+                except queue.Empty:
+                    continue
+                except Exception as e:
+                    logger.error(f"❌ Error in weapon processing thread: {e}")
+                    time.sleep(0.1)
+
+        # ── Thread 7: Results Merging and Frame Encoding ──────────────
         def merging_thread():
             """Merge results from face, plate, fire, and HAR processing"""
             logger.info("🔄 Thread 6: Results Merging started")
@@ -804,6 +929,7 @@ class EnhancedSecuritySystemAPI:
                 'plate': {},
                 'fire': {},
                 'har': {},   # NEW
+                'weapon': {},
             }
             
             while True:
@@ -851,7 +977,16 @@ class EnhancedSecuritySystemAPI:
                                 pending_results['har'][frame_id] = har_results
                         except queue.Empty:
                             pass
-                    
+
+                    # Collect weapon results
+                    if self.weapon_detection_enabled and self.weapon_system:
+                        try:
+                            while True:
+                                frame_id, weapon_results = self.weapon_results_queue.get(block=False)
+                                pending_results['weapon'][frame_id] = weapon_results
+                        except queue.Empty:
+                            pass
+
                     # Process frames
                     frames_to_process = list(pending_results['frames'].keys())
                     
@@ -883,6 +1018,7 @@ class EnhancedSecuritySystemAPI:
                             plate_results = []
                             fire_results = []
                             har_results = []       # NEW
+                            weapon_results = []
                             final_frame = frame.copy()
                             
                             # Get face results
@@ -907,11 +1043,17 @@ class EnhancedSecuritySystemAPI:
                                 har_results = pending_results['har'].pop(frame_id)
                                 if har_results:
                                     final_frame = self.har_system.draw_detections(final_frame, har_results)
-                            
+
+                            # Get weapon results and draw
+                            if frame_id in pending_results['weapon']:
+                                weapon_results = pending_results['weapon'].pop(frame_id)
+                                if weapon_results:
+                                    final_frame = self.weapon_system.draw_detections(final_frame, weapon_results)
+
                             # Encode and queue for sending
                             self._encode_and_queue_frame(
                                 final_frame, face_results, plate_results,
-                                fire_results, har_results
+                                fire_results, har_results, weapon_results
                             )
                             self.stats['frames_processed'] += 1
                     
@@ -932,6 +1074,7 @@ class EnhancedSecuritySystemAPI:
             threading.Thread(target=plate_processing_thread, daemon=True, name="PlateProcessingThread"),
             threading.Thread(target=fire_processing_thread, daemon=True, name="FireProcessingThread"),
             threading.Thread(target=har_processing_thread, daemon=True, name="HARProcessingThread"),     # NEW
+            threading.Thread(target=weapon_processing_thread, daemon=True, name="WeaponProcessingThread"),
             threading.Thread(target=merging_thread, daemon=True, name="MergingThread")
         ]
         
@@ -1005,14 +1148,14 @@ class EnhancedSecuritySystemAPI:
     
     def _cleanup_old_results(self, pending_results: Dict, current_frame_id: int, max_age: int = 90):
         """Remove old cached results"""
-        for result_type in ['frames', 'face', 'plate', 'fire', 'har']:
+        for result_type in ['frames', 'face', 'plate', 'fire', 'har', 'weapon']:
             old_frame_ids = [fid for fid in pending_results[result_type].keys() 
                            if (current_frame_id - fid) > max_age]
             for fid in old_frame_ids:
                 pending_results[result_type].pop(fid, None)
     
     def _encode_and_queue_frame(self, frame, face_results, plate_results,
-                                 fire_results=None, har_results=None):
+                                 fire_results=None, har_results=None, weapon_results=None):
         """Encode frame to JPEG and add to output queue"""
         try:
             height, width = frame.shape[:2]
@@ -1033,10 +1176,12 @@ class EnhancedSecuritySystemAPI:
                 "plate_results": convert_to_serializable(plate_results),
                 "fire_results": convert_to_serializable(fire_results) if fire_results else [],
                 "har_results": convert_to_serializable(har_results) if har_results else [],   # NEW
+                "weapon_results": convert_to_serializable(weapon_results) if weapon_results else [],
                 "timestamp": datetime.now().isoformat(),
                 "demographics_enabled": self.demographics_enabled,
                 "fire_detection_enabled": self.fire_detection_enabled,
                 "har_enabled": self.har_enabled,                                                # NEW
+                "weapon_detection_enabled": self.weapon_detection_enabled,
             }
             
             try:
@@ -1059,10 +1204,12 @@ class EnhancedSecuritySystemAPI:
             self.plate_processing_queue,
             self.fire_processing_queue,
             self.har_processing_queue,       # NEW
+            self.weapon_processing_queue,
             self.face_results_queue,
             self.plate_results_queue,
             self.fire_results_queue,
             self.har_results_queue,           # NEW
+            self.weapon_results_queue,
             self.processed_frame_queue
         ]
         
@@ -1089,14 +1236,15 @@ if __name__ == "__main__":
     logger.info("📡 API: http://localhost:8000")
     logger.info("🔌 WebSocket: ws://localhost:8000/ws")
     logger.info("📚 Docs: http://localhost:8000/docs")
-    logger.info("🧵 Multi-threaded processing: 7 threads")
+    logger.info("🧵 Multi-threaded processing: 8 threads")
     logger.info("   - Thread 1: Video Capture")
     logger.info("   - Thread 2: Facial Recognition + Demographics")
     logger.info("   - Thread 3: License Plate Recognition")
     logger.info("   - Thread 4: Fire & Smoke Detection")
     logger.info("   - Thread 5: Human Action Recognition (SlowFast)")
-    logger.info("   - Thread 6: Results Merging")
-    logger.info("   - Thread 7: Demographics Analysis (DeepFace)")
+    logger.info("   - Thread 6: Weapon Detection")
+    logger.info("   - Thread 7: Results Merging")
+    logger.info("   - Thread 8: Demographics Analysis (DeepFace)")
     
     if DEEPFACE_AVAILABLE:
         logger.info("✅ DeepFace enabled - demographics analysis available")
