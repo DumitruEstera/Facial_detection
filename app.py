@@ -295,9 +295,14 @@ class EnhancedSecuritySystemAPI:
         # Initialize face detector for finding all faces
         self.face_detector = YuNetFaceDetector()
         
-        # Video streaming
-        self.video_capture = None
+         # Video streaming - Multi-camera support
+        self.video_capture = None          # kept for backward compatibility (CAM-01 / laptop)
         self.is_streaming = False
+        
+        # Multi-camera management
+        # key = camera_id (e.g. "CAM-01", "CAM-02"), value = dict with capture, url, active
+        self.cameras = {}                  # managed IP / extra cameras
+        self.cameras_lock = threading.Lock()
         
         # Independent detection flags - allows any combination
         self.face_detection_enabled = True
@@ -393,16 +398,24 @@ class EnhancedSecuritySystemAPI:
         @self.app.get("/api/status")
         async def get_status():
             stats = self.db.get_statistics()
+            # Check IP camera (CAM-02) status
+            cam02_streaming = False
+            with self.cameras_lock:
+                if "CAM-02" in self.cameras:
+                    cam_info = self.cameras["CAM-02"]
+                    cam02_streaming = cam_info.get("active", False) and cam_info.get("capture") is not None
             return {
                 "status": "online",
                 "streaming": self.is_streaming,
+                "cam01_streaming": self.is_streaming and self.video_capture is not None and self.video_capture.isOpened(),
+                "cam02_streaming": cam02_streaming,
                 "face_detection_enabled": self.face_detection_enabled,
                 "plate_detection_enabled": self.plate_detection_enabled,
                 "demographics_enabled": self.demographics_enabled,
                 "fire_detection_enabled": self.fire_detection_enabled,
                 "fire_system_available": self.fire_system is not None,
-                "har_enabled": self.har_enabled,                         # NEW
-                "har_system_available": self.har_system is not None,     # NEW
+                "har_enabled": self.har_enabled,
+                "har_system_available": self.har_system is not None,
                 "weapon_detection_enabled": self.weapon_detection_enabled,
                 "weapon_system_available": self.weapon_system is not None,
                 "statistics": convert_to_serializable(stats),
@@ -425,7 +438,7 @@ class EnhancedSecuritySystemAPI:
             except Exception as e:
                 logger.error(f"❌ Error starting camera: {e}")
                 raise HTTPException(status_code=500, detail=str(e))
-        
+
         @self.app.post("/api/camera/stop")
         async def stop_camera():
             try:
@@ -433,15 +446,125 @@ class EnhancedSecuritySystemAPI:
                     self.is_streaming = False
                     if self.video_capture:
                         self.video_capture.release()
+                        self.video_capture = None
                     self._clear_all_queues()
-                    logger.info("🛑 Camera stopped")
-                    return {"status": "success", "message": "Camera stopped"}
+                    logger.info("🛑 Laptop camera stopped")
+                    return {"status": "success", "message": "Laptop camera stopped"}
                 else:
-                    return {"status": "info", "message": "Camera not running"}
+                    return {"status": "info", "message": "Laptop camera not running"}
             except Exception as e:
                 logger.error(f"❌ Error stopping camera: {e}")
                 raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.post("/api/camera/stop-all")
+        async def stop_all_cameras():
+            """Stop all cameras (laptop + IP)"""
+            try:
+                self.is_streaming = False
+                if self.video_capture:
+                    self.video_capture.release()
+                    self.video_capture = None
+                with self.cameras_lock:
+                    for cam_id, cam_info in self.cameras.items():
+                        if cam_info.get("capture"):
+                            cam_info["capture"].release()
+                            cam_info["active"] = False
+                    self.cameras.clear()
+                self._clear_all_queues()
+                logger.info("🛑 All cameras stopped")
+                return {"status": "success", "message": "All cameras stopped"}
+            except Exception as e:
+                logger.error(f"❌ Error stopping all cameras: {e}")
+                raise HTTPException(status_code=500, detail=str(e))
         
+        @self.app.post("/api/camera/add-ip")
+        async def add_ip_camera(request_data: dict):
+            """Add an IP camera (e.g. phone via IP Webcam app)"""
+            try:
+                url = request_data.get("url")          # e.g. "http://192.168.1.5:8080/video"
+                camera_id = request_data.get("camera_id", "CAM-02")
+                location = request_data.get("location", "IP Camera")
+                
+                if not url:
+                    raise HTTPException(status_code=400, detail="URL is required")
+                
+                # Try to open the stream
+                cap = cv2.VideoCapture(url)
+                if not cap.isOpened():
+                    raise HTTPException(status_code=500, detail=f"Could not open video stream: {url}")
+                
+                with self.cameras_lock:
+                    # If camera_id already exists, release the old one
+                    if camera_id in self.cameras:
+                        old = self.cameras[camera_id]
+                        if old.get("capture"):
+                            old["capture"].release()
+                    
+                    self.cameras[camera_id] = {
+                        "capture": cap,
+                        "url": url,
+                        "location": location,
+                        "active": True,
+                    }
+                
+                logger.info(f"📱 IP Camera added: {camera_id} -> {url}")
+                return {
+                    "status": "success",
+                    "message": f"IP Camera {camera_id} connected",
+                    "camera_id": camera_id,
+                    "url": url,
+                }
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error(f"❌ Error adding IP camera: {e}")
+                raise HTTPException(status_code=500, detail=str(e))
+        
+        @self.app.post("/api/camera/remove-ip")
+        async def remove_ip_camera(request_data: dict):
+            """Remove / disconnect an IP camera"""
+            try:
+                camera_id = request_data.get("camera_id", "CAM-02")
+                
+                with self.cameras_lock:
+                    if camera_id in self.cameras:
+                        cam = self.cameras.pop(camera_id)
+                        if cam.get("capture"):
+                            cam["capture"].release()
+                        logger.info(f"📱 IP Camera removed: {camera_id}")
+                        return {"status": "success", "message": f"Camera {camera_id} removed"}
+                    else:
+                        return {"status": "info", "message": f"Camera {camera_id} not found"}
+            except Exception as e:
+                logger.error(f"❌ Error removing IP camera: {e}")
+                raise HTTPException(status_code=500, detail=str(e))
+        
+        @self.app.get("/api/cameras/list")
+        async def list_cameras():
+            """List all active cameras"""
+            result = []
+            
+            # Laptop camera (CAM-01)
+            result.append({
+                "camera_id": "CAM-01",
+                "type": "local",
+                "location": "Main Entrance",
+                "active": self.is_streaming and self.video_capture is not None and self.video_capture.isOpened(),
+            })
+            
+            # IP cameras
+            with self.cameras_lock:
+                for cam_id, cam_info in self.cameras.items():
+                    result.append({
+                        "camera_id": cam_id,
+                        "type": "ip",
+                        "url": cam_info.get("url", ""),
+                        "location": cam_info.get("location", ""),
+                        "active": cam_info.get("active", False) and cam_info.get("capture") is not None,
+                    })
+            
+            return {"cameras": result}
+
         @self.app.post("/api/face/toggle")
         async def toggle_face_detection(request: dict):
             """Toggle face detection on/off"""
@@ -617,91 +740,65 @@ class EnhancedSecuritySystemAPI:
         
         # ── Thread 1: Video Capture ───────────────────────────────────
         def capture_thread():
-            """Capture frames and queue for processing"""
-            logger.info("🎥 Thread 1: Video Capture started")
+            """Capture frames from ALL cameras and queue for processing"""
+            logger.info("🎥 Thread 1: Video Capture started (multi-camera)")
             
             while True:
                 try:
+                    captured_any = False
+                    
+                    # ── Camera 1: Laptop webcam (CAM-01) ──────────────
                     if self.is_streaming and self.video_capture and self.video_capture.isOpened():
                         ret, frame = self.video_capture.read()
                         if ret:
+                            captured_any = True
                             self.stats['frames_captured'] += 1
                             current_frame_id = self.frame_id
                             self.frame_id += 1
                             
-                            # Frame skipping logic
                             self.frame_counter += 1
-                            if self.frame_counter % self.frame_skip != 0:
-                                continue
-                            
-                            queued_for_face = False
-                            queued_for_plate = False
-                            queued_for_fire = False
-                            queued_for_har = False   # NEW
-                            queued_for_weapon = False
-
-                            # Queue for face processing
-                            if self.face_detection_enabled:
-                                try:
-                                    self.face_processing_queue.put((current_frame_id, frame.copy()), block=False)
-                                    queued_for_face = True
-                                except queue.Full:
-                                    self.stats['queue_skips'] += 1
-                            else:
-                                queued_for_face = True
-                            
-                            # Queue for plate processing
-                            if self.plate_detection_enabled:
-                                try:
-                                    self.plate_processing_queue.put((current_frame_id, frame.copy()), block=False)
-                                    queued_for_plate = True
-                                except queue.Full:
-                                    self.stats['queue_skips'] += 1
-                            else:
-                                queued_for_plate = True
-                            
-                            # Queue for fire detection
-                            if self.fire_detection_enabled and self.fire_system:
-                                try:
-                                    self.fire_processing_queue.put((current_frame_id, frame.copy()), block=False)
-                                    queued_for_fire = True
-                                except queue.Full:
-                                    self.stats['queue_skips'] += 1
-                            else:
-                                queued_for_fire = True
-                            
-                            # NEW: Queue for HAR processing
-                            if self.har_enabled and self.har_system:
-                                try:
-                                    self.har_processing_queue.put((current_frame_id, frame.copy()), block=False)
-                                    queued_for_har = True
-                                except queue.Full:
-                                    self.stats['queue_skips'] += 1
-                            else:
-                                queued_for_har = True
-
-                            # Queue for weapon detection
-                            if self.weapon_detection_enabled and self.weapon_system:
-                                try:
-                                    self.weapon_processing_queue.put((current_frame_id, frame.copy()), block=False)
-                                    queued_for_weapon = True
-                                except queue.Full:
-                                    self.stats['queue_skips'] += 1
-                            else:
-                                queued_for_weapon = True
-
-                            # Add to raw queue if all enabled processors were fed
-                            if queued_for_face and queued_for_plate and queued_for_fire and queued_for_har and queued_for_weapon:
-                                try:
-                                    self.raw_frame_queue.put((current_frame_id, frame.copy()), block=False)
-                                except queue.Full:
-                                    self.stats['frames_dropped'] += 1
-                            else:
-                                self.stats['frames_dropped'] += 1
+                            if self.frame_counter % self.frame_skip == 0:
+                                self._dispatch_frame(current_frame_id, "CAM-01", frame)
                         else:
-                            logger.warning("⚠️ Failed to read frame from camera")
-                            time.sleep(0.1)
-                    else:
+                            pass  # failed read, will retry
+                    
+                    # ── IP Cameras (CAM-02, CAM-03, …) ────────────────
+                    with self.cameras_lock:
+                        cam_items = list(self.cameras.items())
+                    
+                    for cam_id, cam_info in cam_items:
+                        if not cam_info.get("active"):
+                            continue
+                        cap = cam_info.get("capture")
+                        if cap is None or not cap.isOpened():
+                            # Try to reconnect
+                            url = cam_info.get("url")
+                            if url:
+                                try:
+                                    new_cap = cv2.VideoCapture(url)
+                                    if new_cap.isOpened():
+                                        with self.cameras_lock:
+                                            self.cameras[cam_id]["capture"] = new_cap
+                                        cap = new_cap
+                                        logger.info(f"📱 Reconnected {cam_id}")
+                                    else:
+                                        continue
+                                except:
+                                    continue
+                            else:
+                                continue
+                        
+                        ret, frame = cap.read()
+                        if ret:
+                            captured_any = True
+                            self.stats['frames_captured'] += 1
+                            current_frame_id = self.frame_id
+                            self.frame_id += 1
+                            self._dispatch_frame(current_frame_id, cam_id, frame)
+                        else:
+                            logger.warning(f"⚠️ Failed to read frame from {cam_id}")
+                    
+                    if not captured_any:
                         time.sleep(0.1)
                         
                 except Exception as e:
@@ -715,7 +812,7 @@ class EnhancedSecuritySystemAPI:
             
             while True:
                 try:
-                    frame_id, frame = self.face_processing_queue.get(timeout=1.0)
+                    frame_id, camera_id, frame = self.face_processing_queue.get(timeout=1.0)
                     
                     start_time = time.time()
                     
@@ -750,11 +847,11 @@ class EnhancedSecuritySystemAPI:
                         logger.debug(f"👤 Detected {len(face_results)} faces in {processing_time:.3f}s")
                     
                     try:
-                        self.face_results_queue.put((frame_id, processed_frame, face_results), block=False)
+                        self.face_results_queue.put((frame_id, camera_id, processed_frame, face_results), block=False)
                     except queue.Full:
                         try:
                             self.face_results_queue.get(block=False)
-                            self.face_results_queue.put((frame_id, processed_frame, face_results), block=False)
+                            self.face_results_queue.put((frame_id, camera_id, processed_frame, face_results), block=False)
                         except:
                             pass
                     
@@ -771,7 +868,7 @@ class EnhancedSecuritySystemAPI:
             
             while True:
                 try:
-                    frame_id, frame = self.plate_processing_queue.get(timeout=1.0)
+                    frame_id, camera_id, frame = self.plate_processing_queue.get(timeout=1.0)
                     
                     start_time = time.time()
                     plate_results = self._process_plates(frame)
@@ -782,11 +879,11 @@ class EnhancedSecuritySystemAPI:
                         logger.debug(f"🚗 Detected {len(plate_results)} plates in {processing_time:.3f}s")
                     
                     try:
-                        self.plate_results_queue.put((frame_id, plate_results), block=False)
+                        self.plate_results_queue.put((frame_id, camera_id, plate_results), block=False)
                     except queue.Full:
                         try:
                             self.plate_results_queue.get(block=False)
-                            self.plate_results_queue.put((frame_id, plate_results), block=False)
+                            self.plate_results_queue.put((frame_id, camera_id, plate_results), block=False)
                         except:
                             pass
                     
@@ -803,7 +900,7 @@ class EnhancedSecuritySystemAPI:
             
             while True:
                 try:
-                    frame_id, frame = self.fire_processing_queue.get(timeout=1.0)
+                    frame_id, camera_id, frame = self.fire_processing_queue.get(timeout=1.0)
                     
                     if not self.fire_detection_enabled or not self.fire_system:
                         continue
@@ -821,11 +918,11 @@ class EnhancedSecuritySystemAPI:
                             logger.warning(f"🚨 CRITICAL FIRE ALERT! {len(critical)} critical detection(s)")
                     
                     try:
-                        self.fire_results_queue.put((frame_id, fire_results), block=False)
+                        self.fire_results_queue.put((frame_id, camera_id, fire_results), block=False)
                     except queue.Full:
                         try:
                             self.fire_results_queue.get(block=False)
-                            self.fire_results_queue.put((frame_id, fire_results), block=False)
+                            self.fire_results_queue.put((frame_id, camera_id, fire_results), block=False)
                         except:
                             pass
                     
@@ -842,7 +939,7 @@ class EnhancedSecuritySystemAPI:
             
             while True:
                 try:
-                    frame_id, frame = self.har_processing_queue.get(timeout=1.0)
+                    frame_id, camera_id, frame = self.har_processing_queue.get(timeout=1.0)
                     
                     if not self.har_enabled or not self.har_system:
                         continue
@@ -865,11 +962,11 @@ class EnhancedSecuritySystemAPI:
                                            f"{critical[0]['action_label']} detected!")
                     
                     try:
-                        self.har_results_queue.put((frame_id, har_results), block=False)
+                        self.har_results_queue.put((frame_id, camera_id, har_results), block=False)
                     except queue.Full:
                         try:
                             self.har_results_queue.get(block=False)
-                            self.har_results_queue.put((frame_id, har_results), block=False)
+                            self.har_results_queue.put((frame_id, camera_id, har_results), block=False)
                         except:
                             pass
                     
@@ -886,7 +983,7 @@ class EnhancedSecuritySystemAPI:
 
             while True:
                 try:
-                    frame_id, frame = self.weapon_processing_queue.get(timeout=1.0)
+                    frame_id, camera_id, frame = self.weapon_processing_queue.get(timeout=1.0)
 
                     if not self.weapon_detection_enabled or not self.weapon_system:
                         continue
@@ -904,11 +1001,11 @@ class EnhancedSecuritySystemAPI:
                             logger.warning(f"🚨 CRITICAL WEAPON ALERT! {len(critical)} critical detection(s)")
 
                     try:
-                        self.weapon_results_queue.put((frame_id, weapon_results), block=False)
+                        self.weapon_results_queue.put((frame_id, camera_id, weapon_results), block=False)
                     except queue.Full:
                         try:
                             self.weapon_results_queue.get(block=False)
-                            self.weapon_results_queue.put((frame_id, weapon_results), block=False)
+                            self.weapon_results_queue.put((frame_id, camera_id, weapon_results), block=False)
                         except:
                             pass
 
@@ -937,8 +1034,8 @@ class EnhancedSecuritySystemAPI:
                     # Collect raw frames
                     try:
                         while True:
-                            frame_id, frame = self.raw_frame_queue.get(block=False)
-                            pending_results['frames'][frame_id] = frame
+                            frame_id, camera_id, frame = self.raw_frame_queue.get(block=False)
+                            pending_results['frames'][frame_id] = (camera_id, frame)
                     except queue.Empty:
                         pass
                     
@@ -946,7 +1043,7 @@ class EnhancedSecuritySystemAPI:
                     if self.face_detection_enabled:
                         try:
                             while True:
-                                frame_id, processed_frame, face_results = self.face_results_queue.get(block=False)
+                                frame_id, camera_id, processed_frame, face_results = self.face_results_queue.get(block=False)
                                 pending_results['face'][frame_id] = (processed_frame, face_results)
                         except queue.Empty:
                             pass
@@ -955,7 +1052,7 @@ class EnhancedSecuritySystemAPI:
                     if self.plate_detection_enabled:
                         try:
                             while True:
-                                frame_id, plate_results = self.plate_results_queue.get(block=False)
+                                frame_id, camera_id, plate_results = self.plate_results_queue.get(block=False)
                                 pending_results['plate'][frame_id] = plate_results
                         except queue.Empty:
                             pass
@@ -964,7 +1061,7 @@ class EnhancedSecuritySystemAPI:
                     if self.fire_detection_enabled and self.fire_system:
                         try:
                             while True:
-                                frame_id, fire_results = self.fire_results_queue.get(block=False)
+                                frame_id, camera_id, fire_results = self.fire_results_queue.get(block=False)
                                 pending_results['fire'][frame_id] = fire_results
                         except queue.Empty:
                             pass
@@ -973,7 +1070,7 @@ class EnhancedSecuritySystemAPI:
                     if self.har_enabled and self.har_system:
                         try:
                             while True:
-                                frame_id, har_results = self.har_results_queue.get(block=False)
+                                frame_id, camera_id, har_results = self.har_results_queue.get(block=False)
                                 pending_results['har'][frame_id] = har_results
                         except queue.Empty:
                             pass
@@ -982,7 +1079,7 @@ class EnhancedSecuritySystemAPI:
                     if self.weapon_detection_enabled and self.weapon_system:
                         try:
                             while True:
-                                frame_id, weapon_results = self.weapon_results_queue.get(block=False)
+                                frame_id, camera_id, weapon_results = self.weapon_results_queue.get(block=False)
                                 pending_results['weapon'][frame_id] = weapon_results
                         except queue.Empty:
                             pass
@@ -1012,7 +1109,7 @@ class EnhancedSecuritySystemAPI:
                             should_process = expected_results_ready
                         
                         if should_process:
-                            frame = pending_results['frames'].pop(frame_id)
+                            camera_id, frame = pending_results['frames'].pop(frame_id)
                             
                             face_results = []
                             plate_results = []
@@ -1053,7 +1150,8 @@ class EnhancedSecuritySystemAPI:
                             # Encode and queue for sending
                             self._encode_and_queue_frame(
                                 final_frame, face_results, plate_results,
-                                fire_results, har_results, weapon_results
+                                fire_results, har_results, weapon_results,
+                                camera_id=camera_id
                             )
                             self.stats['frames_processed'] += 1
                     
@@ -1154,8 +1252,70 @@ class EnhancedSecuritySystemAPI:
             for fid in old_frame_ids:
                 pending_results[result_type].pop(fid, None)
     
+    def _dispatch_frame(self, frame_id, camera_id, frame):
+        """Dispatch a single frame from any camera into the processing queues"""
+        queued_for_face = False
+        queued_for_plate = False
+        queued_for_fire = False
+        queued_for_har = False
+        queued_for_weapon = False
+
+        if self.face_detection_enabled:
+            try:
+                self.face_processing_queue.put((frame_id, camera_id, frame.copy()), block=False)
+                queued_for_face = True
+            except queue.Full:
+                self.stats['queue_skips'] += 1
+        else:
+            queued_for_face = True
+
+        if self.plate_detection_enabled:
+            try:
+                self.plate_processing_queue.put((frame_id, camera_id, frame.copy()), block=False)
+                queued_for_plate = True
+            except queue.Full:
+                self.stats['queue_skips'] += 1
+        else:
+            queued_for_plate = True
+
+        if self.fire_detection_enabled and self.fire_system:
+            try:
+                self.fire_processing_queue.put((frame_id, camera_id, frame.copy()), block=False)
+                queued_for_fire = True
+            except queue.Full:
+                self.stats['queue_skips'] += 1
+        else:
+            queued_for_fire = True
+
+        if self.har_enabled and self.har_system:
+            try:
+                self.har_processing_queue.put((frame_id, camera_id, frame.copy()), block=False)
+                queued_for_har = True
+            except queue.Full:
+                self.stats['queue_skips'] += 1
+        else:
+            queued_for_har = True
+
+        if self.weapon_detection_enabled and self.weapon_system:
+            try:
+                self.weapon_processing_queue.put((frame_id, camera_id, frame.copy()), block=False)
+                queued_for_weapon = True
+            except queue.Full:
+                self.stats['queue_skips'] += 1
+        else:
+            queued_for_weapon = True
+
+        if queued_for_face and queued_for_plate and queued_for_fire and queued_for_har and queued_for_weapon:
+            try:
+                self.raw_frame_queue.put((frame_id, camera_id, frame.copy()), block=False)
+            except queue.Full:
+                self.stats['frames_dropped'] += 1
+        else:
+            self.stats['frames_dropped'] += 1
+    
     def _encode_and_queue_frame(self, frame, face_results, plate_results,
-                                 fire_results=None, har_results=None, weapon_results=None):
+                                 fire_results=None, har_results=None, weapon_results=None,
+                                 camera_id="CAM-01"):
         """Encode frame to JPEG and add to output queue"""
         try:
             height, width = frame.shape[:2]
@@ -1171,6 +1331,7 @@ class EnhancedSecuritySystemAPI:
             
             message = {
                 "type": "video_frame",
+                "camera_id": camera_id,
                 "frame": frame_base64,
                 "face_results": convert_to_serializable(face_results),
                 "plate_results": convert_to_serializable(plate_results),

@@ -1,5 +1,5 @@
 import React from 'react';
-import { Menu, Shield, LogOut } from 'lucide-react';
+import { Menu, Shield, LogOut, Monitor } from 'lucide-react';
 
 const Header = ({
   onMenuClick,
@@ -10,7 +10,7 @@ const Header = ({
   activeTab,
   onLogout
 }) => {
-  const isStreaming = systemStatus?.streaming || false;
+  const cam01Streaming = systemStatus?.cam01_streaming || false;
 
   return (
     <header className="h-16 bg-white border-b border-gray-200 flex items-center justify-between px-6 sticky top-0 z-40">
@@ -33,7 +33,7 @@ const Header = ({
         </div>
       </div>
 
-      <div className="flex items-center gap-4">
+      <div className="flex items-center gap-3">
         {/* Connection Status */}
         <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium ${
           isConnected
@@ -44,17 +44,19 @@ const Header = ({
           {isConnected ? 'Connected' : 'Disconnected'}
         </div>
 
-        {/* Stream Control */}
+        {/* Laptop Camera Control */}
         {activeTab === 'dashboard' && (
           <button
-            onClick={() => isStreaming ? onStopCamera() : onStartCamera()}
-            className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-colors ${
-              isStreaming
+            onClick={() => cam01Streaming ? onStopCamera() : onStartCamera()}
+            className={`flex items-center gap-2 px-4 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+              cam01Streaming
                 ? 'bg-red-50 text-red-700 hover:bg-red-100 border border-red-200'
                 : 'bg-[#3374D0] text-white hover:bg-[#2861B0]'
             }`}
+            title={cam01Streaming ? 'Stop Laptop Camera' : 'Start Laptop Camera'}
           >
-            {isStreaming ? 'Stop Stream' : 'Start Stream'}
+            <Monitor className="w-4 h-4" />
+            <span className="hidden md:inline">{cam01Streaming ? 'Stop' : 'Start'} Laptop</span>
           </button>
         )}
 

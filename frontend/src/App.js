@@ -17,17 +17,9 @@ import Statistics from './components/Statistics';
 const API_BASE = 'http://localhost:8000';
 const WS_URL = 'ws://localhost:8000/ws';
 
-// Initial camera definitions
+// Initial camera — only the laptop webcam is always present
 const INITIAL_CAMERAS = [
-  { id: 'CAM-01', status: 'inactive', stream: null, location: 'Main Entrance' },
-  { id: 'CAM-02', status: 'inactive', stream: null, location: 'Parking Lot' },
-  { id: 'CAM-03', status: 'inactive', stream: null, location: 'Rear Exit' },
-  { id: 'CAM-04', status: 'inactive', stream: null, location: 'Lobby' },
-  { id: 'CAM-05', status: 'inactive', stream: null, location: 'Corridor A' },
-  { id: 'CAM-06', status: 'inactive', stream: null, location: 'Corridor B' },
-  { id: 'CAM-07', status: 'inactive', stream: null, location: 'Server Room' },
-  { id: 'CAM-08', status: 'inactive', stream: null, location: 'Storage Area' },
-  { id: 'CAM-09', status: 'inactive', stream: null, location: 'Emergency Exit' }
+  { id: 'CAM-01', status: 'inactive', stream: null, location: 'Laptop Camera' },
 ];
 
 function App() {
@@ -68,18 +60,26 @@ function App() {
         const data = JSON.parse(event.data);
 
         if (data.type === 'video_frame') {
-          // Update cameras for multi-camera view
-          setCameras(prevCameras =>
-            prevCameras.map(camera =>
-              camera.id === 'CAM-01'
-                ? {
-                    ...camera,
-                    stream: `data:image/jpeg;base64,${data.frame}`,
-                    status: 'active'
-                  }
-                : camera
-            )
-          );
+          const cameraId = data.camera_id || 'CAM-01';
+          
+          // Update the matching camera slot with the frame, or add it if new
+          setCameras(prevCameras => {
+            const exists = prevCameras.some(c => c.id === cameraId);
+            if (exists) {
+              return prevCameras.map(camera =>
+                camera.id === cameraId
+                  ? { ...camera, stream: `data:image/jpeg;base64,${data.frame}`, status: 'active' }
+                  : camera
+              );
+            }
+            // New camera arrived via WebSocket — add it
+            return [...prevCameras, {
+              id: cameraId,
+              status: 'active',
+              stream: `data:image/jpeg;base64,${data.frame}`,
+              location: `IP Camera`
+            }];
+          });
 
           // Process alerts from detection results
           const newAlerts = [];
@@ -89,7 +89,7 @@ function App() {
             data.face_results.forEach(result => {
               if (result.name === 'Unknown') {
                 newAlerts.push({
-                  cameraId: 'CAM-01',
+                  cameraId: cameraId,
                   type: 'unauthorized',
                   severity: 'critical',
                   timestamp: new Date().toISOString(),
@@ -102,7 +102,7 @@ function App() {
           // Fire detection alerts
           if (data.fire_results && data.fire_results.length > 0) {
             newAlerts.push({
-              cameraId: 'CAM-01',
+              cameraId: cameraId,
               type: 'fire',
               severity: 'critical',
               timestamp: new Date().toISOString(),
@@ -115,7 +115,7 @@ function App() {
             const harDetections = data.har_results.filter(r => r.class !== 'normal');
             harDetections.forEach(det => {
               newAlerts.push({
-                cameraId: 'CAM-01',
+                cameraId: cameraId,
                 type: 'har',
                 severity: det.severity || 'high',
                 timestamp: new Date().toISOString(),
@@ -128,7 +128,7 @@ function App() {
           if (data.weapon_results && data.weapon_results.length > 0) {
             data.weapon_results.forEach(det => {
               newAlerts.push({
-                cameraId: 'CAM-01',
+                cameraId: cameraId,
                 type: 'weapon',
                 severity: det.severity || 'critical',
                 timestamp: new Date().toISOString(),
@@ -227,6 +227,45 @@ function App() {
       fetchStatus();
     } catch (error) {
       console.error('Error stopping camera:', error);
+    }
+  };
+
+  const addIpCamera = async (url, cameraId, location) => {
+    try {
+      const response = await fetch(`${API_BASE}/api/camera/add-ip`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url, camera_id: cameraId, location })
+      });
+      const data = await response.json();
+      if (data.status === 'success') {
+        // Add the camera slot so it appears immediately while waiting for frames
+        setCameras(prevCameras => {
+          const exists = prevCameras.some(c => c.id === cameraId);
+          if (exists) return prevCameras;
+          return [...prevCameras, { id: cameraId, status: 'inactive', stream: null, location }];
+        });
+      }
+      fetchStatus();
+      return data;
+    } catch (error) {
+      console.error('Error adding IP camera:', error);
+      throw error;
+    }
+  };
+
+  const removeIpCamera = async (cameraId) => {
+    try {
+      await fetch(`${API_BASE}/api/camera/remove-ip`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ camera_id: cameraId })
+      });
+      // Remove the camera from the list entirely
+      setCameras(prevCameras => prevCameras.filter(c => c.id !== cameraId));
+      fetchStatus();
+    } catch (error) {
+      console.error('Error removing IP camera:', error);
     }
   };
 
@@ -388,7 +427,12 @@ function App() {
           <div className="max-w-[1600px] mx-auto grid grid-cols-1 lg:grid-cols-4 gap-6">
             {/* Main Content - Camera Grid */}
             <div className="lg:col-span-3">
-              <CameraGrid cameras={cameras} alerts={alerts} />
+              <CameraGrid
+                cameras={cameras}
+                alerts={alerts}
+                onAddIpCamera={addIpCamera}
+                onRemoveIpCamera={removeIpCamera}
+              />
             </div>
 
             {/* Right Sidebar - Settings & Activity */}
