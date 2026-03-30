@@ -1,15 +1,18 @@
 import React from 'react';
-import { LayoutDashboard, UserPlus, Car, FileText, BarChart3, X } from 'lucide-react';
+import { LayoutDashboard, UserPlus, Car, FileText, BarChart3, X, Users } from 'lucide-react';
 
-const navItems = [
-  { id: 'dashboard', icon: LayoutDashboard, label: 'Dashboard' },
-  { id: 'person-reg', icon: UserPlus, label: 'Register Person' },
-  { id: 'plate-reg', icon: Car, label: 'Register Plate' },
-  { id: 'logs', icon: FileText, label: 'Logs' },
-  { id: 'stats', icon: BarChart3, label: 'Statistics' },
+const allNavItems = [
+  { id: 'dashboard', icon: LayoutDashboard, label: 'Dashboard', adminOnly: false },
+  { id: 'person-reg', icon: UserPlus, label: 'Register Person', adminOnly: true },
+  { id: 'plate-reg', icon: Car, label: 'Register Plate', adminOnly: true },
+  { id: 'logs', icon: FileText, label: 'Logs', adminOnly: false },
+  { id: 'stats', icon: BarChart3, label: 'Statistics', adminOnly: true },
+  { id: 'users', icon: Users, label: 'User Management', adminOnly: true },
 ];
 
-const Sidebar = ({ isOpen, onClose, activeTab, onNavigate }) => {
+const Sidebar = ({ isOpen, onClose, activeTab, onNavigate, userRole }) => {
+  const isAdmin = userRole === 'admin';
+  const navItems = allNavItems.filter(item => !item.adminOnly || isAdmin);
   if (!isOpen) return null;
 
   const handleNavigate = (tabId) => {

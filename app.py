@@ -11,8 +11,9 @@ Key features:
 5. Improved queue management and result merging
 """
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Tuple
 import cv2
@@ -23,7 +24,8 @@ import threading
 import queue
 import time
 import numpy as np
-from datetime import datetime
+import jwt
+from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 import logging
 
@@ -67,10 +69,50 @@ class LicensePlateRegistration(BaseModel):
     is_authorized: bool = True
     notes: Optional[str] = None
 
-# Simple user credentials for dashboard login
-DASHBOARD_USERS = {
-    "admin": "admin123",
-}
+class CreateUserRequest(BaseModel):
+    username: str
+    password: str
+    role: str = 'user'
+    full_name: Optional[str] = None
+
+class UpdateUserRequest(BaseModel):
+    role: Optional[str] = None
+    full_name: Optional[str] = None
+    password: Optional[str] = None
+
+# JWT Configuration
+JWT_SECRET = "security-dashboard-secret-key-change-in-production"
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRATION_HOURS = 8
+
+security = HTTPBearer()
+
+def create_jwt_token(user_data: dict) -> str:
+    payload = {
+        "sub": user_data["username"],
+        "user_id": user_data["id"],
+        "role": user_data["role"],
+        "full_name": user_data.get("full_name", ""),
+        "exp": datetime.utcnow() + timedelta(hours=JWT_EXPIRATION_HOURS),
+        "iat": datetime.utcnow()
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+def decode_jwt_token(token: str) -> dict:
+    try:
+        return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token has expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
+    return decode_jwt_token(credentials.credentials)
+
+def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return current_user
 
 # Database configuration
 DB_CONFIG = {
@@ -368,14 +410,18 @@ class EnhancedSecuritySystemAPI:
         @self.app.post("/api/login")
         async def login(credentials: LoginRequest):
             """Authenticate user for dashboard access"""
-            if (credentials.username in DASHBOARD_USERS and
-                    DASHBOARD_USERS[credentials.username] == credentials.password):
-                logger.info(f"✅ User '{credentials.username}' logged in")
+            user = self.db.authenticate_user(credentials.username, credentials.password)
+            if user:
+                token = create_jwt_token(user)
+                logger.info(f"✅ User '{credentials.username}' logged in (role: {user['role']})")
                 return {
                     "status": "success",
+                    "token": token,
                     "user": {
-                        "username": credentials.username,
-                        "role": "administrator"
+                        "id": user["id"],
+                        "username": user["username"],
+                        "role": user["role"],
+                        "full_name": user.get("full_name", "")
                     }
                 }
             raise HTTPException(status_code=401, detail="Invalid username or password")
@@ -575,32 +621,32 @@ class EnhancedSecuritySystemAPI:
             return {"cameras": result}
 
         @self.app.post("/api/face/toggle")
-        async def toggle_face_detection(request: dict):
-            """Toggle face detection on/off"""
+        async def toggle_face_detection(request: dict, current_user: dict = Depends(require_admin)):
+            """Toggle face detection on/off (admin only)"""
             enabled = request.get("enabled", True)
             self.face_detection_enabled = enabled
             logger.info(f"👤 Face detection: {'enabled' if enabled else 'disabled'}")
             return {"status": "success", "face_detection_enabled": self.face_detection_enabled}
         
         @self.app.post("/api/plate/toggle")
-        async def toggle_plate_detection(request: dict):
-            """Toggle license plate detection on/off"""
+        async def toggle_plate_detection(request: dict, current_user: dict = Depends(require_admin)):
+            """Toggle license plate detection on/off (admin only)"""
             enabled = request.get("enabled", True)
             self.plate_detection_enabled = enabled
             logger.info(f"🚗 License plate detection: {'enabled' if enabled else 'disabled'}")
             return {"status": "success", "plate_detection_enabled": self.plate_detection_enabled}
         
         @self.app.post("/api/demographics/toggle")
-        async def toggle_demographics(request: dict):
-            """Toggle demographic analysis on/off"""
+        async def toggle_demographics(request: dict, current_user: dict = Depends(require_admin)):
+            """Toggle demographic analysis on/off (admin only)"""
             enabled = request.get("enabled", True)
             self.demographics_enabled = enabled
             logger.info(f"🧠 Demographics analysis: {'enabled' if enabled else 'disabled'}")
             return {"status": "success", "demographics_enabled": self.demographics_enabled}
         
         @self.app.post("/api/fire/toggle")
-        async def toggle_fire_detection(request: dict):
-            """Toggle fire detection on/off"""
+        async def toggle_fire_detection(request: dict, current_user: dict = Depends(require_admin)):
+            """Toggle fire detection on/off (admin only)"""
             if self.fire_system is None:
                 raise HTTPException(status_code=400, detail="Fire detection system not available")
             enabled = request.get("enabled", True)
@@ -610,8 +656,8 @@ class EnhancedSecuritySystemAPI:
         
         # ── NEW: HAR toggle endpoint ──────────────────────────────────
         @self.app.post("/api/har/toggle")
-        async def toggle_har(request: dict):
-            """Toggle Human Action Recognition on/off"""
+        async def toggle_har(request: dict, current_user: dict = Depends(require_admin)):
+            """Toggle Human Action Recognition on/off (admin only)"""
             enabled = request.get("enabled", True)
             self.har_enabled = enabled
             logger.info(f"🏃 Human Action Recognition: {'enabled' if enabled else 'disabled'}")
@@ -640,8 +686,8 @@ class EnhancedSecuritySystemAPI:
         
         # ── Weapon Detection toggle endpoint ─────────────────────
         @self.app.post("/api/weapon/toggle")
-        async def toggle_weapon_detection(request: dict):
-            """Toggle Weapon Detection on/off"""
+        async def toggle_weapon_detection(request: dict, current_user: dict = Depends(require_admin)):
+            """Toggle Weapon Detection on/off (admin only)"""
             enabled = request.get("enabled", True)
             self.weapon_detection_enabled = enabled
             logger.info(f"🔫 Weapon Detection: {'enabled' if enabled else 'disabled'}")
@@ -668,7 +714,7 @@ class EnhancedSecuritySystemAPI:
             }
 
         @self.app.post("/api/persons/register")
-        async def register_person(person: PersonRegistration):
+        async def register_person(person: PersonRegistration, current_user: dict = Depends(require_admin)):
             try:
                 return {
                     "status": "success", 
@@ -679,7 +725,7 @@ class EnhancedSecuritySystemAPI:
                 raise HTTPException(status_code=500, detail=str(e))
         
         @self.app.post("/api/plates/register")
-        async def register_plate(plate: LicensePlateRegistration):
+        async def register_plate(plate: LicensePlateRegistration, current_user: dict = Depends(require_admin)):
             try:
                 success = self.plate_system.register_plate(
                     plate_number=plate.plate_number,
@@ -709,19 +755,96 @@ class EnhancedSecuritySystemAPI:
                 raise HTTPException(status_code=500, detail=str(e))
         
         @self.app.get("/api/statistics")
-        async def get_statistics():
+        async def get_statistics(current_user: dict = Depends(require_admin)):
             try:
                 stats = self.db.get_statistics()
                 return convert_to_serializable(stats)
             except Exception as e:
                 raise HTTPException(status_code=500, detail=str(e))
         
+        # ── User Management endpoints (admin only) ────────────────
+        @self.app.get("/api/users")
+        async def list_users(current_user: dict = Depends(require_admin)):
+            """List all users"""
+            try:
+                users = self.db.list_users()
+                return {"users": convert_to_serializable(users)}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.post("/api/users")
+        async def create_user(user_req: CreateUserRequest, current_user: dict = Depends(require_admin)):
+            """Create a new user"""
+            try:
+                if user_req.role not in ('admin', 'user'):
+                    raise HTTPException(status_code=400, detail="Role must be 'admin' or 'user'")
+                user_id = self.db.create_user(
+                    username=user_req.username,
+                    password=user_req.password,
+                    role=user_req.role,
+                    full_name=user_req.full_name
+                )
+                return {"status": "success", "user_id": user_id, "message": f"User '{user_req.username}' created"}
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.put("/api/users/{user_id}")
+        async def update_user(user_id: int, user_req: UpdateUserRequest, current_user: dict = Depends(require_admin)):
+            """Update a user"""
+            try:
+                if user_req.role and user_req.role not in ('admin', 'user'):
+                    raise HTTPException(status_code=400, detail="Role must be 'admin' or 'user'")
+                updated = self.db.update_user(
+                    user_id=user_id,
+                    role=user_req.role,
+                    full_name=user_req.full_name,
+                    password=user_req.password
+                )
+                if updated:
+                    return {"status": "success", "message": "User updated"}
+                raise HTTPException(status_code=404, detail="User not found")
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.delete("/api/users/{user_id}")
+        async def delete_user(user_id: int, current_user: dict = Depends(require_admin)):
+            """Delete a user"""
+            try:
+                if current_user.get("user_id") == user_id:
+                    raise HTTPException(status_code=400, detail="Cannot delete your own account")
+                deleted = self.db.delete_user(user_id)
+                if deleted:
+                    return {"status": "success", "message": "User deleted"}
+                raise HTTPException(status_code=404, detail="User not found")
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.put("/api/users/me/password")
+        async def change_own_password(request: dict, current_user: dict = Depends(get_current_user)):
+            """Change own password (any authenticated user)"""
+            try:
+                new_password = request.get("new_password")
+                if not new_password or len(new_password) < 4:
+                    raise HTTPException(status_code=400, detail="Password must be at least 4 characters")
+                self.db.update_user(user_id=current_user["user_id"], password=new_password)
+                return {"status": "success", "message": "Password changed"}
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
         @self.app.websocket("/ws")
         async def websocket_endpoint(websocket: WebSocket):
             await websocket.accept()
             self.client_connections.append(websocket)
             logger.info(f"🔌 WebSocket client connected. Total: {len(self.client_connections)}")
-            
+
             try:
                 while True:
                     try:
@@ -729,20 +852,19 @@ class EnhancedSecuritySystemAPI:
                         await websocket.send_text(json.dumps(message))
                     except queue.Empty:
                         pass
-                    except Exception as e:
-                        logger.error(f"❌ Error sending WebSocket message: {e}")
+                    except Exception:
                         break
-                    
+
                     await asyncio.sleep(0.03)  # ~30 FPS
-                    
+
             except WebSocketDisconnect:
+                pass
+            except Exception:
+                pass
+            finally:
                 if websocket in self.client_connections:
                     self.client_connections.remove(websocket)
                 logger.info(f"🔌 WebSocket disconnected. Total: {len(self.client_connections)}")
-            except Exception as e:
-                logger.error(f"❌ WebSocket error: {e}")
-                if websocket in self.client_connections:
-                    self.client_connections.remove(websocket)
     
     def setup_background_tasks(self):
         """Setup multi-threaded processing pipeline with demographics and HAR"""

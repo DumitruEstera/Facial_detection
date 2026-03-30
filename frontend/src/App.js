@@ -12,6 +12,7 @@ import PersonRegistration from './components/PersonRegistration';
 import PlateRegistration from './components/PlateRegistration';
 import Logs from './components/Logs';
 import Statistics from './components/Statistics';
+import UserManagement from './components/UserManagement';
 
 // API base URL
 const API_BASE = 'http://localhost:8000';
@@ -22,12 +23,31 @@ const INITIAL_CAMERAS = [
   { id: 'CAM-01', status: 'inactive', stream: null, location: 'Laptop Camera' },
 ];
 
+// Helper to get auth headers for API calls
+const getAuthHeaders = () => {
+  const token = localStorage.getItem('auth_token');
+  return token ? { 'Authorization': `Bearer ${token}` } : {};
+};
+
 function App() {
   // Auth state
   const [isAuthenticated, setIsAuthenticated] = useState(() => {
-    return !!localStorage.getItem('auth_user');
+    return !!localStorage.getItem('auth_token');
+  });
+  const [userRole, setUserRole] = useState(() => {
+    try {
+      const user = JSON.parse(localStorage.getItem('auth_user') || '{}');
+      return user.role || 'user';
+    } catch { return 'user'; }
+  });
+  const [userName, setUserName] = useState(() => {
+    try {
+      const user = JSON.parse(localStorage.getItem('auth_user') || '{}');
+      return user.full_name || user.username || '';
+    } catch { return ''; }
   });
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const isAdmin = userRole === 'admin';
 
   // App state
   const [cameras, setCameras] = useState(INITIAL_CAMERAS);
@@ -196,7 +216,9 @@ function App() {
   // Fetch system status
   const fetchStatus = useCallback(async () => {
     try {
-      const response = await fetch(`${API_BASE}/api/status`);
+      const response = await fetch(`${API_BASE}/api/status`, {
+        headers: getAuthHeaders()
+      });
       const data = await response.json();
       setSystemStatus(data);
     } catch (error) {
@@ -214,7 +236,7 @@ function App() {
   // API functions
   const startCamera = async () => {
     try {
-      await fetch(`${API_BASE}/api/camera/start`, { method: 'POST' });
+      await fetch(`${API_BASE}/api/camera/start`, { method: 'POST', headers: getAuthHeaders() });
       fetchStatus();
     } catch (error) {
       console.error('Error starting camera:', error);
@@ -223,7 +245,7 @@ function App() {
 
   const stopCamera = async () => {
     try {
-      await fetch(`${API_BASE}/api/camera/stop`, { method: 'POST' });
+      await fetch(`${API_BASE}/api/camera/stop`, { method: 'POST', headers: getAuthHeaders() });
       fetchStatus();
     } catch (error) {
       console.error('Error stopping camera:', error);
@@ -234,7 +256,7 @@ function App() {
     try {
       const response = await fetch(`${API_BASE}/api/camera/add-ip`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify({ url, camera_id: cameraId, location })
       });
       const data = await response.json();
@@ -258,7 +280,7 @@ function App() {
     try {
       await fetch(`${API_BASE}/api/camera/remove-ip`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify({ camera_id: cameraId })
       });
       // Remove the camera from the list entirely
@@ -273,7 +295,7 @@ function App() {
     try {
       await fetch(`${API_BASE}/api/face/toggle`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify({ enabled })
       });
       setFaceDetectionEnabled(enabled);
@@ -287,7 +309,7 @@ function App() {
     try {
       await fetch(`${API_BASE}/api/plate/toggle`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify({ enabled })
       });
       setPlateDetectionEnabled(enabled);
@@ -301,7 +323,7 @@ function App() {
     try {
       await fetch(`${API_BASE}/api/demographics/toggle`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify({ enabled })
       });
       setDemographicsEnabled(enabled);
@@ -315,7 +337,7 @@ function App() {
     try {
       await fetch(`${API_BASE}/api/fire/toggle`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify({ enabled })
       });
       setFireDetectionEnabled(enabled);
@@ -329,7 +351,7 @@ function App() {
     try {
       await fetch(`${API_BASE}/api/har/toggle`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify({ enabled })
       });
       setHarEnabled(enabled);
@@ -343,7 +365,7 @@ function App() {
     try {
       await fetch(`${API_BASE}/api/weapon/toggle`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify({ enabled })
       });
       setWeaponDetectionEnabled(enabled);
@@ -357,7 +379,7 @@ function App() {
     try {
       const response = await fetch(`${API_BASE}/api/persons/register`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify(personData)
       });
       return await response.json();
@@ -371,7 +393,7 @@ function App() {
     try {
       const response = await fetch(`${API_BASE}/api/plates/register`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify(plateData)
       });
       return await response.json();
@@ -383,11 +405,16 @@ function App() {
 
   const handleLogin = (user) => {
     setIsAuthenticated(true);
+    setUserRole(user.role || 'user');
+    setUserName(user.full_name || user.username || '');
   };
 
   const handleLogout = () => {
+    localStorage.removeItem('auth_token');
     localStorage.removeItem('auth_user');
     setIsAuthenticated(false);
+    setUserRole('user');
+    setUserName('');
     if (ws) ws.close();
   };
 
@@ -413,6 +440,8 @@ function App() {
         onStopCamera={stopCamera}
         activeTab={activeTab}
         onLogout={handleLogout}
+        userName={userName}
+        userRole={userRole}
       />
 
       <Sidebar
@@ -420,6 +449,7 @@ function App() {
         onClose={() => setIsSidebarOpen(false)}
         activeTab={activeTab}
         onNavigate={setActiveTab}
+        userRole={userRole}
       />
 
       <main className="p-6">
@@ -450,17 +480,18 @@ function App() {
                 onToggleFireDetection={toggleFireDetection}
                 onToggleHar={toggleHar}
                 onToggleWeaponDetection={toggleWeaponDetection}
+                isAdmin={isAdmin}
               />
               <RecentActivity alerts={alerts} />
             </div>
           </div>
         )}
 
-        {activeTab === 'person-reg' && (
+        {activeTab === 'person-reg' && isAdmin && (
           <PersonRegistration onRegister={registerPerson} />
         )}
 
-        {activeTab === 'plate-reg' && (
+        {activeTab === 'plate-reg' && isAdmin && (
           <PlateRegistration onRegister={registerPlate} />
         )}
 
@@ -470,9 +501,15 @@ function App() {
           </div>
         )}
 
-        {activeTab === 'stats' && (
+        {activeTab === 'stats' && isAdmin && (
           <div className="max-w-[1600px] mx-auto">
             <Statistics systemStatus={systemStatus} />
+          </div>
+        )}
+
+        {activeTab === 'users' && isAdmin && (
+          <div className="max-w-[1600px] mx-auto">
+            <UserManagement />
           </div>
         )}
       </main>

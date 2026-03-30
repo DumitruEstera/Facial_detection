@@ -8,7 +8,9 @@ const Header = ({
   onStartCamera,
   onStopCamera,
   activeTab,
-  onLogout
+  onLogout,
+  userName,
+  userRole
 }) => {
   const cam01Streaming = systemStatus?.cam01_streaming || false;
 
@@ -59,6 +61,18 @@ const Header = ({
             <span className="hidden md:inline">{cam01Streaming ? 'Stop' : 'Start'} Laptop</span>
           </button>
         )}
+
+        {/* User Info */}
+        <div className="flex items-center gap-2 px-3 py-1.5">
+          <span className="text-sm text-slate-600 hidden md:inline">{userName || userRole}</span>
+          <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
+            userRole === 'admin'
+              ? 'bg-purple-50 text-purple-700 border border-purple-200'
+              : 'bg-slate-50 text-slate-600 border border-slate-200'
+          }`}>
+            {userRole === 'admin' ? 'Admin' : 'User'}
+          </span>
+        </div>
 
         {/* Logout */}
         <button

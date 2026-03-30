@@ -3,6 +3,7 @@ from psycopg2.extras import RealDictCursor
 import numpy as np
 from typing import List, Dict, Optional
 import pickle
+import bcrypt
 from datetime import datetime
 
 class DatabaseManager:
@@ -102,13 +103,28 @@ class DatabaseManager:
                 )
             """)
             
+            # Create users table
+            self.cursor.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id SERIAL PRIMARY KEY,
+                    username VARCHAR(50) UNIQUE NOT NULL,
+                    password_hash VARCHAR(255) NOT NULL,
+                    role VARCHAR(20) NOT NULL DEFAULT 'user',
+                    full_name VARCHAR(255),
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
             # Create indexes
             self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_plate_number ON license_plates(plate_number)")
             self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_vehicle_access_time ON vehicle_access_logs(detected_at)")
             self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_vehicle_camera ON vehicle_access_logs(camera_id)")
-            
+
             self.conn.commit()
             print("Database tables created/verified")
+
+            # Seed default admin user if no users exist
+            self._seed_default_admin()
             
         except Exception as e:
             self.conn.rollback()
@@ -384,4 +400,135 @@ class DatabaseManager:
             
         except Exception as e:
             print(f"Error getting statistics: {e}")
+            raise
+
+    # ── User management methods ──────────────────────────────────
+
+    def _seed_default_admin(self):
+        """Create default admin user if no users exist"""
+        try:
+            self.cursor.execute("SELECT COUNT(*) as count FROM users")
+            count = self.cursor.fetchone()['count']
+            if count == 0:
+                self.create_user('admin', 'admin123', 'admin', 'Administrator')
+                print("Default admin user created (admin/admin123)")
+        except Exception as e:
+            self.conn.rollback()
+            print(f"Error seeding default admin: {e}")
+
+    @staticmethod
+    def _hash_password(password: str) -> str:
+        return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+    @staticmethod
+    def _verify_password(password: str, password_hash: str) -> bool:
+        return bcrypt.checkpw(password.encode('utf-8'), password_hash.encode('utf-8'))
+
+    def create_user(self, username: str, password: str, role: str = 'user',
+                    full_name: str = None) -> int:
+        """Create a new user"""
+        try:
+            password_hash = self._hash_password(password)
+            query = """
+                INSERT INTO users (username, password_hash, role, full_name)
+                VALUES (%s, %s, %s, %s)
+                RETURNING id
+            """
+            self.cursor.execute(query, (username, password_hash, role, full_name))
+            self.conn.commit()
+            return self.cursor.fetchone()['id']
+        except psycopg2.IntegrityError:
+            self.conn.rollback()
+            raise ValueError(f"Username '{username}' already exists")
+        except Exception as e:
+            self.conn.rollback()
+            print(f"Error creating user: {e}")
+            raise
+
+    def authenticate_user(self, username: str, password: str) -> Optional[Dict]:
+        """Authenticate user and return user info (without password_hash)"""
+        try:
+            query = "SELECT * FROM users WHERE username = %s"
+            self.cursor.execute(query, (username,))
+            user = self.cursor.fetchone()
+            if user and self._verify_password(password, user['password_hash']):
+                return {
+                    'id': user['id'],
+                    'username': user['username'],
+                    'role': user['role'],
+                    'full_name': user['full_name'],
+                    'created_at': user['created_at']
+                }
+            return None
+        except Exception as e:
+            print(f"Error authenticating user: {e}")
+            raise
+
+    def get_user_by_id(self, user_id: int) -> Optional[Dict]:
+        """Get user by ID (without password_hash)"""
+        try:
+            query = "SELECT id, username, role, full_name, created_at FROM users WHERE id = %s"
+            self.cursor.execute(query, (user_id,))
+            return self.cursor.fetchone()
+        except Exception as e:
+            print(f"Error getting user: {e}")
+            raise
+
+    def get_user_by_username(self, username: str) -> Optional[Dict]:
+        """Get user by username (without password_hash)"""
+        try:
+            query = "SELECT id, username, role, full_name, created_at FROM users WHERE username = %s"
+            self.cursor.execute(query, (username,))
+            return self.cursor.fetchone()
+        except Exception as e:
+            print(f"Error getting user: {e}")
+            raise
+
+    def list_users(self) -> List[Dict]:
+        """List all users (without password_hash)"""
+        try:
+            query = "SELECT id, username, role, full_name, created_at FROM users ORDER BY created_at"
+            self.cursor.execute(query)
+            return self.cursor.fetchall()
+        except Exception as e:
+            print(f"Error listing users: {e}")
+            raise
+
+    def update_user(self, user_id: int, role: str = None, full_name: str = None,
+                    password: str = None) -> bool:
+        """Update user details"""
+        try:
+            updates = []
+            params = []
+            if role is not None:
+                updates.append("role = %s")
+                params.append(role)
+            if full_name is not None:
+                updates.append("full_name = %s")
+                params.append(full_name)
+            if password is not None:
+                updates.append("password_hash = %s")
+                params.append(self._hash_password(password))
+            if not updates:
+                return False
+            params.append(user_id)
+            query = f"UPDATE users SET {', '.join(updates)} WHERE id = %s"
+            self.cursor.execute(query, params)
+            self.conn.commit()
+            return self.cursor.rowcount > 0
+        except Exception as e:
+            self.conn.rollback()
+            print(f"Error updating user: {e}")
+            raise
+
+    def delete_user(self, user_id: int) -> bool:
+        """Delete a user"""
+        try:
+            query = "DELETE FROM users WHERE id = %s"
+            self.cursor.execute(query, (user_id,))
+            self.conn.commit()
+            return self.cursor.rowcount > 0
+        except Exception as e:
+            self.conn.rollback()
+            print(f"Error deleting user: {e}")
             raise
