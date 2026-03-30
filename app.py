@@ -526,15 +526,24 @@ class EnhancedSecuritySystemAPI:
             try:
                 camera_id = request_data.get("camera_id", "CAM-02")
                 
+                cap = None
+                removed = False
                 with self.cameras_lock:
                     if camera_id in self.cameras:
                         cam = self.cameras.pop(camera_id)
-                        if cam.get("capture"):
-                            cam["capture"].release()
+                        cap = cam.get("capture")
+                        removed = True
                         logger.info(f"📱 IP Camera removed: {camera_id}")
-                        return {"status": "success", "message": f"Camera {camera_id} removed"}
-                    else:
-                        return {"status": "info", "message": f"Camera {camera_id} not found"}
+
+                if removed:
+                    # Release capture with a delay so the capture thread
+                    # finishes any in-progress read on this object first.
+                    if cap:
+                        import threading as _threading
+                        _threading.Timer(1.0, lambda c=cap: c.release()).start()
+                    return {"status": "success", "message": f"Camera {camera_id} removed"}
+                else:
+                    return {"status": "info", "message": f"Camera {camera_id} not found"}
             except Exception as e:
                 logger.error(f"❌ Error removing IP camera: {e}")
                 raise HTTPException(status_code=500, detail=str(e))
@@ -788,7 +797,15 @@ class EnhancedSecuritySystemAPI:
                             else:
                                 continue
                         
-                        ret, frame = cap.read()
+                        # Re-check camera still exists (may have been removed)
+                        with self.cameras_lock:
+                            if cam_id not in self.cameras:
+                                continue
+
+                        try:
+                            ret, frame = cap.read()
+                        except Exception:
+                            continue
                         if ret:
                             captured_any = True
                             self.stats['frames_captured'] += 1

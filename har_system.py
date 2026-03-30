@@ -240,8 +240,10 @@ class HumanActionRecognitionSystem:
         compatible with the fire-detection results so that the merging
         thread can treat them uniformly.
         """
-        # Store BGR→RGB converted copy
+        # Store BGR→RGB converted copy, resized to uniform dimensions
+        # so that np.stack() works even with multi-camera inputs
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        rgb = cv2.resize(rgb, (self.crop_size, self.crop_size))
         self.frame_buffer.append(rgb)
         self.frame_count += 1
 
