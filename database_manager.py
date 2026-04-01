@@ -214,6 +214,136 @@ class DatabaseManager:
             print(f"Error retrieving person: {e}")
             raise
             
+    # ── Person management methods ─────────────────────────────────
+
+    def list_persons(self, search: str = None, department: str = None,
+                     limit: int = 50, offset: int = 0) -> Dict:
+        """List persons with optional search/filter and pagination"""
+        try:
+            conditions = []
+            params = []
+
+            if search:
+                conditions.append("(LOWER(p.name) LIKE LOWER(%s) OR LOWER(p.employee_id) LIKE LOWER(%s))")
+                search_pattern = f"%{search}%"
+                params.extend([search_pattern, search_pattern])
+
+            if department:
+                conditions.append("LOWER(p.department) = LOWER(%s)")
+                params.append(department)
+
+            where_clause = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+
+            # Get total count
+            count_query = f"SELECT COUNT(*) as count FROM persons p{where_clause}"
+            self.cursor.execute(count_query, params)
+            total = self.cursor.fetchone()['count']
+
+            # Get paginated results with face count and last seen
+            query = f"""
+                SELECT p.*,
+                       COALESCE(fe.face_count, 0) as face_count,
+                       al.last_seen
+                FROM persons p
+                LEFT JOIN (
+                    SELECT person_id, COUNT(*) as face_count
+                    FROM face_embeddings
+                    GROUP BY person_id
+                ) fe ON p.id = fe.person_id
+                LEFT JOIN (
+                    SELECT person_id, MAX(detected_at) as last_seen
+                    FROM access_logs
+                    GROUP BY person_id
+                ) al ON p.id = al.person_id
+                {where_clause}
+                ORDER BY p.created_at DESC
+                LIMIT %s OFFSET %s
+            """
+            params.extend([limit, offset])
+            self.cursor.execute(query, params)
+            persons = self.cursor.fetchall()
+
+            return {"persons": persons, "total": total}
+        except Exception as e:
+            print(f"Error listing persons: {e}")
+            raise
+
+    def update_person(self, person_id: int, name: str = None,
+                      department: str = None,
+                      authorized_zones: List[str] = None) -> bool:
+        """Update person details"""
+        try:
+            updates = []
+            params = []
+            if name is not None:
+                updates.append("name = %s")
+                params.append(name)
+            if department is not None:
+                updates.append("department = %s")
+                params.append(department)
+            if authorized_zones is not None:
+                updates.append("authorized_zones = %s")
+                params.append(authorized_zones)
+            if not updates:
+                return False
+            params.append(person_id)
+            query = f"UPDATE persons SET {', '.join(updates)} WHERE id = %s"
+            self.cursor.execute(query, params)
+            self.conn.commit()
+            return self.cursor.rowcount > 0
+        except Exception as e:
+            self.conn.rollback()
+            print(f"Error updating person: {e}")
+            raise
+
+    def delete_person(self, person_id: int) -> bool:
+        """Delete a person (cascades to embeddings and access logs)"""
+        try:
+            query = "DELETE FROM persons WHERE id = %s"
+            self.cursor.execute(query, (person_id,))
+            self.conn.commit()
+            return self.cursor.rowcount > 0
+        except Exception as e:
+            self.conn.rollback()
+            print(f"Error deleting person: {e}")
+            raise
+
+    def count_person_embeddings(self, person_id: int) -> int:
+        """Count face embeddings for a person"""
+        try:
+            query = "SELECT COUNT(*) as count FROM face_embeddings WHERE person_id = %s"
+            self.cursor.execute(query, (person_id,))
+            return self.cursor.fetchone()['count']
+        except Exception as e:
+            print(f"Error counting embeddings: {e}")
+            raise
+
+    def get_person_access_history(self, person_id: int, limit: int = 20) -> List[Dict]:
+        """Get recent access history for a person"""
+        try:
+            query = """
+                SELECT camera_id, confidence, detected_at
+                FROM access_logs
+                WHERE person_id = %s
+                ORDER BY detected_at DESC
+                LIMIT %s
+            """
+            self.cursor.execute(query, (person_id, limit))
+            return self.cursor.fetchall()
+        except Exception as e:
+            print(f"Error getting access history: {e}")
+            raise
+
+    def get_all_departments(self) -> List[str]:
+        """Get all unique departments"""
+        try:
+            query = "SELECT DISTINCT department FROM persons WHERE department IS NOT NULL AND department != '' ORDER BY department"
+            self.cursor.execute(query)
+            return [row['department'] for row in self.cursor.fetchall()]
+        except Exception as e:
+            print(f"Error getting departments: {e}")
+            raise
+
     # License plate related methods
     def add_license_plate(self, plate_number: str, vehicle_type: str = None,
                          owner_name: str = None, owner_id: str = None,

@@ -11,7 +11,7 @@ Key features:
 5. Improved queue management and result merging
 """
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, Request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
@@ -74,6 +74,11 @@ class CreateUserRequest(BaseModel):
     password: str
     role: str = 'user'
     full_name: Optional[str] = None
+
+class UpdatePersonRequest(BaseModel):
+    name: Optional[str] = None
+    department: Optional[str] = None
+    authorized_zones: Optional[List[str]] = None
 
 class UpdateUserRequest(BaseModel):
     role: Optional[str] = None
@@ -716,14 +721,173 @@ class EnhancedSecuritySystemAPI:
         @self.app.post("/api/persons/register")
         async def register_person(person: PersonRegistration, current_user: dict = Depends(require_admin)):
             try:
+                person_id = self.db.add_person(
+                    name=person.name,
+                    employee_id=person.employee_id,
+                    department=person.department,
+                    authorized_zones=person.authorized_zones
+                )
                 return {
-                    "status": "success", 
+                    "status": "success",
                     "message": f"Person {person.name} registered successfully",
+                    "person_id": person_id,
                     "person": person.dict()
                 }
             except Exception as e:
+                if "duplicate key" in str(e).lower() or "unique" in str(e).lower():
+                    raise HTTPException(status_code=400, detail=f"Employee ID '{person.employee_id}' already exists")
                 raise HTTPException(status_code=500, detail=str(e))
-        
+
+        @self.app.get("/api/persons")
+        async def list_persons(search: str = None, department: str = None,
+                              limit: int = 50, offset: int = 0,
+                              current_user: dict = Depends(require_admin)):
+            try:
+                result = self.db.list_persons(search=search, department=department,
+                                             limit=limit, offset=offset)
+                return convert_to_serializable(result)
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.get("/api/persons/departments")
+        async def get_departments(current_user: dict = Depends(require_admin)):
+            try:
+                departments = self.db.get_all_departments()
+                return {"departments": departments}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.get("/api/persons/{person_id}")
+        async def get_person(person_id: int, current_user: dict = Depends(require_admin)):
+            try:
+                person = self.db.get_person_by_id(person_id)
+                if not person:
+                    raise HTTPException(status_code=404, detail="Person not found")
+                face_count = self.db.count_person_embeddings(person_id)
+                access_history = self.db.get_person_access_history(person_id, limit=20)
+                return convert_to_serializable({
+                    "person": person,
+                    "face_count": face_count,
+                    "access_history": access_history
+                })
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.put("/api/persons/{person_id}")
+        async def update_person(person_id: int, data: UpdatePersonRequest,
+                               current_user: dict = Depends(require_admin)):
+            try:
+                person = self.db.get_person_by_id(person_id)
+                if not person:
+                    raise HTTPException(status_code=404, detail="Person not found")
+                updated = self.db.update_person(
+                    person_id,
+                    name=data.name,
+                    department=data.department,
+                    authorized_zones=data.authorized_zones
+                )
+                if updated:
+                    return {"status": "success", "message": "Person updated successfully"}
+                return {"status": "info", "message": "No changes made"}
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.delete("/api/persons/{person_id}")
+        async def delete_person(person_id: int, current_user: dict = Depends(require_admin)):
+            try:
+                person = self.db.get_person_by_id(person_id)
+                if not person:
+                    raise HTTPException(status_code=404, detail="Person not found")
+                deleted = self.db.delete_person(person_id)
+                if deleted:
+                    # Rebuild FAISS index after deletion
+                    self.face_system._load_embeddings_from_db()
+                    return {"status": "success", "message": f"Person '{person['name']}' deleted successfully"}
+                raise HTTPException(status_code=500, detail="Failed to delete person")
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.post("/api/persons/{person_id}/faces")
+        async def upload_face_images(person_id: int,
+                                     files: List[UploadFile] = File(...),
+                                     current_user: dict = Depends(require_admin)):
+            """Upload face images for a registered person"""
+            try:
+                person = self.db.get_person_by_id(person_id)
+                if not person:
+                    raise HTTPException(status_code=404, detail="Person not found")
+
+                added_count = 0
+                errors = []
+
+                for file in files:
+                    try:
+                        contents = await file.read()
+                        nparr = np.frombuffer(contents, np.uint8)
+                        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+                        if img is None:
+                            errors.append(f"{file.filename}: Could not decode image")
+                            continue
+
+                        # Detect faces in the image
+                        faces = self.face_system.face_detector.detect_faces(img)
+                        if len(faces) != 1:
+                            errors.append(f"{file.filename}: Expected 1 face, found {len(faces)}")
+                            continue
+
+                        # Extract and store embedding
+                        face_img = self.face_system.face_detector.extract_face(img, faces[0])
+                        if face_img is None:
+                            errors.append(f"{file.filename}: Could not extract face")
+                            continue
+
+                        embedding = self.face_system.feature_extractor.extract_embedding(face_img)
+                        if embedding is None:
+                            errors.append(f"{file.filename}: Could not generate embedding")
+                            continue
+
+                        self.db.add_face_embedding(person_id, embedding)
+                        added_count += 1
+
+                    except Exception as img_error:
+                        errors.append(f"{file.filename}: {str(img_error)}")
+
+                # Rebuild FAISS index with new embeddings
+                if added_count > 0:
+                    self.face_system._load_embeddings_from_db()
+
+                return {
+                    "status": "success",
+                    "added": added_count,
+                    "errors": errors,
+                    "message": f"Added {added_count} face embedding(s) for {person['name']}"
+                }
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.get("/api/persons/{person_id}/access-history")
+        async def get_person_access_history(person_id: int, limit: int = 20,
+                                           current_user: dict = Depends(require_admin)):
+            try:
+                person = self.db.get_person_by_id(person_id)
+                if not person:
+                    raise HTTPException(status_code=404, detail="Person not found")
+                history = self.db.get_person_access_history(person_id, limit=limit)
+                return convert_to_serializable({"history": history})
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
         @self.app.post("/api/plates/register")
         async def register_plate(plate: LicensePlateRegistration, current_user: dict = Depends(require_admin)):
             try:

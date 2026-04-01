@@ -1,9 +1,9 @@
 import React from 'react';
-import { LayoutDashboard, UserPlus, Car, FileText, BarChart3, X, Users } from 'lucide-react';
+import { LayoutDashboard, UserCheck, Car, FileText, BarChart3, X, Users } from 'lucide-react';
 
 const allNavItems = [
   { id: 'dashboard', icon: LayoutDashboard, label: 'Dashboard', adminOnly: false },
-  { id: 'person-reg', icon: UserPlus, label: 'Register Person', adminOnly: true },
+  { id: 'persons', icon: UserCheck, label: 'Person Management', adminOnly: true },
   { id: 'plate-reg', icon: Car, label: 'Register Plate', adminOnly: true },
   { id: 'logs', icon: FileText, label: 'Logs', adminOnly: false },
   { id: 'stats', icon: BarChart3, label: 'Statistics', adminOnly: true },

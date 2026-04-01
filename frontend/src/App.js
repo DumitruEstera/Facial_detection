@@ -8,7 +8,7 @@ import Sidebar from './components/Sidebar';
 import CameraGrid from './components/CameraGrid';
 import IntelligenceSettings from './components/IntelligenceSettings';
 import RecentActivity from './components/RecentActivity';
-import PersonRegistration from './components/PersonRegistration';
+import PersonManagement from './components/PersonManagement';
 import PlateRegistration from './components/PlateRegistration';
 import Logs from './components/Logs';
 import Statistics from './components/Statistics';
@@ -375,20 +375,6 @@ function App() {
     }
   };
 
-  const registerPerson = async (personData) => {
-    try {
-      const response = await fetch(`${API_BASE}/api/persons/register`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-        body: JSON.stringify(personData)
-      });
-      return await response.json();
-    } catch (error) {
-      console.error('Error registering person:', error);
-      throw error;
-    }
-  };
-
   const registerPlate = async (plateData) => {
     try {
       const response = await fetch(`${API_BASE}/api/plates/register`, {
@@ -487,8 +473,10 @@ function App() {
           </div>
         )}
 
-        {activeTab === 'person-reg' && isAdmin && (
-          <PersonRegistration onRegister={registerPerson} />
+        {activeTab === 'persons' && isAdmin && (
+          <div className="max-w-[1600px] mx-auto">
+            <PersonManagement />
+          </div>
         )}
 
         {activeTab === 'plate-reg' && isAdmin && (
