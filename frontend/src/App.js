@@ -9,8 +9,9 @@ import CameraGrid from './components/CameraGrid';
 import IntelligenceSettings from './components/IntelligenceSettings';
 import RecentActivity from './components/RecentActivity';
 import PersonManagement from './components/PersonManagement';
-import PlateRegistration from './components/PlateRegistration';
+import PlateManagement from './components/PlateManagement';
 import Logs from './components/Logs';
+import AlarmManagement from './components/AlarmManagement';
 import Statistics from './components/Statistics';
 import UserManagement from './components/UserManagement';
 
@@ -375,20 +376,6 @@ function App() {
     }
   };
 
-  const registerPlate = async (plateData) => {
-    try {
-      const response = await fetch(`${API_BASE}/api/plates/register`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-        body: JSON.stringify(plateData)
-      });
-      return await response.json();
-    } catch (error) {
-      console.error('Error registering plate:', error);
-      throw error;
-    }
-  };
-
   const handleLogin = (user) => {
     setIsAuthenticated(true);
     setUserRole(user.role || 'user');
@@ -479,8 +466,14 @@ function App() {
           </div>
         )}
 
-        {activeTab === 'plate-reg' && isAdmin && (
-          <PlateRegistration onRegister={registerPlate} />
+        {activeTab === 'alarms' && (
+          <div className="max-w-[1600px] mx-auto">
+            <AlarmManagement />
+          </div>
+        )}
+
+        {activeTab === 'plates' && isAdmin && (
+          <PlateManagement />
         )}
 
         {activeTab === 'logs' && (

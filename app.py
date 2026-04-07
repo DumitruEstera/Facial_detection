@@ -80,10 +80,26 @@ class UpdatePersonRequest(BaseModel):
     department: Optional[str] = None
     authorized_zones: Optional[List[str]] = None
 
+class UpdateLicensePlateRequest(BaseModel):
+    owner_name: Optional[str] = None
+    owner_id: Optional[str] = None
+    vehicle_type: Optional[str] = None
+    is_authorized: Optional[bool] = None
+    expiry_date: Optional[str] = None
+    notes: Optional[str] = None
+
 class UpdateUserRequest(BaseModel):
     role: Optional[str] = None
     full_name: Optional[str] = None
     password: Optional[str] = None
+
+class UpdateAlarmRequest(BaseModel):
+    status: Optional[str] = None
+    notes: Optional[str] = None
+
+class BulkUpdateAlarmsRequest(BaseModel):
+    alarm_ids: List[int]
+    status: str
 
 # JWT Configuration
 JWT_SECRET = "security-dashboard-secret-key-change-in-production"
@@ -381,6 +397,11 @@ class EnhancedSecuritySystemAPI:
         self.unknown_faces_cache = {}
         self.unknown_faces_lock = threading.Lock()
         
+        # Alarm deduplication: tracks last alarm time per (camera_id, type)
+        self.alarm_cooldowns = {}
+        self.alarm_cooldown_seconds = 30
+        self.alarm_lock = threading.Lock()
+
         # Statistics
         self.stats = {
             'frames_captured': 0,
@@ -910,6 +931,98 @@ class EnhancedSecuritySystemAPI:
             except Exception as e:
                 raise HTTPException(status_code=500, detail=str(e))
         
+        # ── License Plate Management endpoints (admin only) ─────
+        @self.app.get("/api/plates")
+        async def list_plates(search: str = None, vehicle_type: str = None,
+                              is_authorized: bool = None,
+                              limit: int = 50, offset: int = 0,
+                              current_user: dict = Depends(require_admin)):
+            try:
+                result = self.db.list_license_plates(
+                    search=search, vehicle_type=vehicle_type,
+                    is_authorized=is_authorized, limit=limit, offset=offset
+                )
+                return convert_to_serializable(result)
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.get("/api/plates/vehicle-types")
+        async def get_vehicle_types(current_user: dict = Depends(require_admin)):
+            try:
+                types = self.db.get_all_vehicle_types()
+                return {"vehicle_types": types}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.get("/api/plates/{plate_number}")
+        async def get_plate(plate_number: str, current_user: dict = Depends(require_admin)):
+            try:
+                plate = self.db.get_license_plate(plate_number)
+                if not plate:
+                    raise HTTPException(status_code=404, detail="License plate not found")
+                access_history = self.db.get_plate_access_history(plate_number, limit=20)
+                return convert_to_serializable({
+                    "plate": plate,
+                    "access_history": access_history
+                })
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.put("/api/plates/{plate_number}")
+        async def update_plate(plate_number: str, data: UpdateLicensePlateRequest,
+                               current_user: dict = Depends(require_admin)):
+            try:
+                plate = self.db.get_license_plate(plate_number)
+                if not plate:
+                    raise HTTPException(status_code=404, detail="License plate not found")
+                updated = self.db.update_license_plate(
+                    plate_number,
+                    owner_name=data.owner_name,
+                    owner_id=data.owner_id,
+                    vehicle_type=data.vehicle_type,
+                    is_authorized=data.is_authorized,
+                    expiry_date=data.expiry_date,
+                    notes=data.notes
+                )
+                if updated:
+                    return {"status": "success", "message": f"Plate {plate_number} updated successfully"}
+                return {"status": "info", "message": "No changes made"}
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.delete("/api/plates/{plate_number}")
+        async def delete_plate(plate_number: str, current_user: dict = Depends(require_admin)):
+            try:
+                plate = self.db.get_license_plate(plate_number)
+                if not plate:
+                    raise HTTPException(status_code=404, detail="License plate not found")
+                deleted = self.db.delete_license_plate(plate_number)
+                if deleted:
+                    return {"status": "success", "message": f"Plate '{plate_number}' deleted successfully"}
+                raise HTTPException(status_code=500, detail="Failed to delete plate")
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.get("/api/plates/{plate_number}/access-history")
+        async def get_plate_history(plate_number: str, limit: int = 20,
+                                    current_user: dict = Depends(require_admin)):
+            try:
+                plate = self.db.get_license_plate(plate_number)
+                if not plate:
+                    raise HTTPException(status_code=404, detail="License plate not found")
+                history = self.db.get_plate_access_history(plate_number, limit=limit)
+                return convert_to_serializable({"history": history})
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
         @self.app.get("/api/logs/vehicle")
         async def get_vehicle_logs(limit: int = 50):
             try:
@@ -998,6 +1111,85 @@ class EnhancedSecuritySystemAPI:
                     raise HTTPException(status_code=400, detail="Password must be at least 4 characters")
                 self.db.update_user(user_id=current_user["user_id"], password=new_password)
                 return {"status": "success", "message": "Password changed"}
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        # ── Alarm management endpoints ─────────────────────────────
+
+        @self.app.get("/api/alarms")
+        async def list_alarms(
+            status: Optional[str] = None,
+            type: Optional[str] = None,
+            severity: Optional[str] = None,
+            camera_id: Optional[str] = None,
+            limit: int = 50,
+            offset: int = 0,
+            current_user: dict = Depends(get_current_user)
+        ):
+            """List alarms with filters"""
+            try:
+                result = self.db.list_alarms(
+                    status=status, alarm_type=type, severity=severity,
+                    camera_id=camera_id, limit=limit, offset=offset
+                )
+                return convert_to_serializable(result)
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.get("/api/alarms/stats")
+        async def alarm_stats(current_user: dict = Depends(get_current_user)):
+            """Get alarm statistics"""
+            try:
+                stats = self.db.get_alarm_stats()
+                return convert_to_serializable(stats)
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.get("/api/alarms/{alarm_id}")
+        async def get_alarm(alarm_id: int, current_user: dict = Depends(get_current_user)):
+            """Get single alarm with full details including snapshot"""
+            try:
+                alarm = self.db.get_alarm(alarm_id)
+                if not alarm:
+                    raise HTTPException(status_code=404, detail="Alarm not found")
+                return convert_to_serializable(alarm)
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.patch("/api/alarms/{alarm_id}")
+        async def update_alarm(alarm_id: int, req: UpdateAlarmRequest,
+                               current_user: dict = Depends(get_current_user)):
+            """Update alarm status/notes"""
+            try:
+                if req.status and req.status not in ('unresolved', 'resolved', 'false_alarm'):
+                    raise HTTPException(status_code=400, detail="Invalid status")
+                resolved_by = current_user.get("full_name") or current_user.get("sub", "")
+                updated = self.db.update_alarm(
+                    alarm_id=alarm_id, status=req.status,
+                    notes=req.notes, resolved_by=resolved_by
+                )
+                if updated:
+                    return {"status": "success", "message": "Alarm updated"}
+                raise HTTPException(status_code=404, detail="Alarm not found")
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.post("/api/alarms/bulk-update")
+        async def bulk_update_alarms(req: BulkUpdateAlarmsRequest,
+                                     current_user: dict = Depends(get_current_user)):
+            """Bulk update alarm statuses"""
+            try:
+                if req.status not in ('unresolved', 'resolved', 'false_alarm'):
+                    raise HTTPException(status_code=400, detail="Invalid status")
+                resolved_by = current_user.get("full_name") or current_user.get("sub", "")
+                count = self.db.bulk_update_alarms(req.alarm_ids, req.status, resolved_by)
+                return {"status": "success", "updated": count}
             except HTTPException:
                 raise
             except Exception as e:
@@ -1450,6 +1642,83 @@ class EnhancedSecuritySystemAPI:
                                 if weapon_results:
                                     final_frame = self.weapon_system.draw_detections(final_frame, weapon_results)
 
+                            # ── Create alarms for detections ──────
+                            # Capture a snapshot for alarms (low quality to save space)
+                            snapshot_b64 = None
+                            has_alarm = False
+
+                            # Check if any alarm-worthy detections exist
+                            if face_results:
+                                for r in face_results:
+                                    if r.get('name') == 'Unknown':
+                                        has_alarm = True
+                                        break
+                            if not has_alarm and (fire_results or
+                                    [r for r in (har_results or []) if r.get('class') != 'normal'] or
+                                    weapon_results):
+                                has_alarm = True
+
+                            if has_alarm:
+                                try:
+                                    snap_frame = final_frame
+                                    h, w = snap_frame.shape[:2]
+                                    if w > 400:
+                                        scale = 400 / w
+                                        snap_frame = cv2.resize(snap_frame, (400, int(h * scale)))
+                                    _, snap_buf = cv2.imencode('.jpg', snap_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+                                    snapshot_b64 = base64.b64encode(snap_buf).decode('utf-8')
+                                except Exception:
+                                    snapshot_b64 = None
+
+                            # Face alarms (unknown persons)
+                            if face_results:
+                                for r in face_results:
+                                    if r.get('name') == 'Unknown':
+                                        self._create_alarm_if_needed(
+                                            camera_id, 'face', 'critical',
+                                            f"Unauthorized person detected ({(r.get('confidence', 0) * 100):.0f}% confidence)",
+                                            snapshot_b64,
+                                            {'confidence': r.get('confidence'), 'bbox': r.get('bbox')}
+                                        )
+
+                            # Fire alarms
+                            if fire_results:
+                                for r in fire_results:
+                                    sev = r.get('severity', 'high')
+                                    cls = r.get('class', 'fire').upper()
+                                    self._create_alarm_if_needed(
+                                        camera_id, 'fire', sev,
+                                        f"{cls} detected ({(r.get('confidence', 0) * 100):.0f}% confidence)",
+                                        snapshot_b64,
+                                        {'class': r.get('class'), 'confidence': r.get('confidence'),
+                                         'area_ratio': r.get('area_ratio')}
+                                    )
+
+                            # HAR alarms (non-normal actions)
+                            if har_results:
+                                for r in har_results:
+                                    if r.get('class') != 'normal':
+                                        sev = r.get('severity', 'high')
+                                        label = r.get('action_label', r.get('class', 'ACTION')).upper()
+                                        self._create_alarm_if_needed(
+                                            camera_id, 'har', sev,
+                                            f"{label} detected ({(r.get('confidence', 0) * 100):.0f}% confidence)",
+                                            snapshot_b64,
+                                            {'action': r.get('class'), 'confidence': r.get('confidence')}
+                                        )
+
+                            # Weapon alarms
+                            if weapon_results:
+                                for r in weapon_results:
+                                    sev = r.get('severity', 'critical')
+                                    cls = (r.get('class') or 'WEAPON').upper()
+                                    self._create_alarm_if_needed(
+                                        camera_id, 'weapon', sev,
+                                        f"{cls} detected ({(r.get('confidence', 0) * 100):.0f}% confidence)",
+                                        snapshot_b64,
+                                        {'class': r.get('class'), 'confidence': r.get('confidence')}
+                                    )
+
                             # Encode and queue for sending
                             self._encode_and_queue_frame(
                                 final_frame, face_results, plate_results,
@@ -1660,6 +1929,33 @@ class EnhancedSecuritySystemAPI:
         except Exception as e:
             logger.error(f"Error encoding frame: {e}")
     
+    def _create_alarm_if_needed(self, camera_id: str, alarm_type: str,
+                                severity: str, description: str,
+                                snapshot_base64: str = None,
+                                detection_metadata: Dict = None):
+        """Create an alarm in the database with deduplication (cooldown-based)"""
+        cooldown_key = f"{camera_id}:{alarm_type}"
+        current_time = time.time()
+
+        with self.alarm_lock:
+            last_time = self.alarm_cooldowns.get(cooldown_key, 0)
+            if current_time - last_time < self.alarm_cooldown_seconds:
+                return  # Skip — duplicate within cooldown
+            self.alarm_cooldowns[cooldown_key] = current_time
+
+        try:
+            self.db.create_alarm(
+                camera_id=camera_id,
+                alarm_type=alarm_type,
+                severity=severity,
+                description=description,
+                snapshot=snapshot_base64,
+                detection_metadata=detection_metadata
+            )
+            logger.info(f"🚨 Alarm created: [{severity.upper()}] {alarm_type} on {camera_id} — {description}")
+        except Exception as e:
+            logger.error(f"Error creating alarm: {e}")
+
     def _clear_all_queues(self):
         """Clear all queues when stopping camera"""
         queues = [

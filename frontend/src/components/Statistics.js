@@ -1,5 +1,5 @@
 import React from 'react';
-import { BarChart3, Users, Car, Shield, Eye, Video, Globe } from 'lucide-react';
+import { BarChart3, Users, Car, Shield, Eye, Video, Globe, Bell, AlertTriangle } from 'lucide-react';
 
 const Statistics = ({ systemStatus }) => {
   const stats = systemStatus.statistics || {};
@@ -12,6 +12,9 @@ const Statistics = ({ systemStatus }) => {
     { label: 'Authorized Plates', value: stats.authorized_plates || 0, color: 'text-emerald-600', bg: 'bg-emerald-50', Icon: Shield },
     { label: 'Vehicle Accesses', value: stats.total_vehicle_accesses || 0, color: 'text-orange-600', bg: 'bg-orange-50', Icon: Car },
     { label: 'Unauthorized Accesses', value: stats.unauthorized_vehicle_accesses || 0, color: 'text-red-600', bg: 'bg-red-50', Icon: Shield },
+    { label: 'Total Alarms', value: stats.total_alarms || 0, color: 'text-indigo-600', bg: 'bg-indigo-50', Icon: Bell },
+    { label: 'Unresolved Alarms', value: stats.unresolved_alarms || 0, color: 'text-red-600', bg: 'bg-red-50', Icon: AlertTriangle },
+    { label: 'Critical Alarms', value: stats.critical_alarms || 0, color: 'text-rose-600', bg: 'bg-rose-50', Icon: AlertTriangle },
   ];
 
   return (

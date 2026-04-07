@@ -4,6 +4,7 @@ import numpy as np
 from typing import List, Dict, Optional
 import pickle
 import bcrypt
+import json
 from datetime import datetime
 
 class DatabaseManager:
@@ -115,10 +116,32 @@ class DatabaseManager:
                 )
             """)
 
+            # Create alarms table
+            self.cursor.execute("""
+                CREATE TABLE IF NOT EXISTS alarms (
+                    id SERIAL PRIMARY KEY,
+                    camera_id VARCHAR(50) NOT NULL,
+                    type VARCHAR(50) NOT NULL,
+                    severity VARCHAR(20) NOT NULL DEFAULT 'medium',
+                    status VARCHAR(20) NOT NULL DEFAULT 'unresolved',
+                    description TEXT,
+                    snapshot TEXT,
+                    detection_metadata JSONB,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    resolved_at TIMESTAMP,
+                    resolved_by VARCHAR(255),
+                    notes TEXT
+                )
+            """)
+
             # Create indexes
             self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_plate_number ON license_plates(plate_number)")
             self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_vehicle_access_time ON vehicle_access_logs(detected_at)")
             self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_vehicle_camera ON vehicle_access_logs(camera_id)")
+            self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_alarms_status ON alarms(status)")
+            self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_alarms_type ON alarms(type)")
+            self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_alarms_severity ON alarms(severity)")
+            self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_alarms_created_at ON alarms(created_at)")
 
             self.conn.commit()
             print("Database tables created/verified")
@@ -344,7 +367,141 @@ class DatabaseManager:
             print(f"Error getting departments: {e}")
             raise
 
-    # License plate related methods
+    # ── License plate management methods ────────────────────────
+
+    def list_license_plates(self, search: str = None, vehicle_type: str = None,
+                            is_authorized: bool = None, limit: int = 50,
+                            offset: int = 0) -> Dict:
+        """List license plates with optional search/filter and pagination"""
+        try:
+            conditions = []
+            params = []
+
+            if search:
+                conditions.append(
+                    "(LOWER(lp.plate_number) LIKE LOWER(%s) OR LOWER(lp.owner_name) LIKE LOWER(%s))"
+                )
+                search_pattern = f"%{search}%"
+                params.extend([search_pattern, search_pattern])
+
+            if vehicle_type:
+                conditions.append("LOWER(lp.vehicle_type) = LOWER(%s)")
+                params.append(vehicle_type)
+
+            if is_authorized is not None:
+                conditions.append("lp.is_authorized = %s")
+                params.append(is_authorized)
+
+            where_clause = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+
+            # Get total count
+            count_query = f"SELECT COUNT(*) as count FROM license_plates lp{where_clause}"
+            self.cursor.execute(count_query, params)
+            total = self.cursor.fetchone()['count']
+
+            # Get paginated results with last detection info
+            query = f"""
+                SELECT lp.*,
+                       val.last_seen,
+                       COALESCE(val.detection_count, 0) as detection_count
+                FROM license_plates lp
+                LEFT JOIN (
+                    SELECT plate_number,
+                           MAX(detected_at) as last_seen,
+                           COUNT(*) as detection_count
+                    FROM vehicle_access_logs
+                    GROUP BY plate_number
+                ) val ON lp.plate_number = val.plate_number
+                {where_clause}
+                ORDER BY lp.registration_date DESC
+                LIMIT %s OFFSET %s
+            """
+            params.extend([limit, offset])
+            self.cursor.execute(query, params)
+            plates = self.cursor.fetchall()
+
+            return {"plates": plates, "total": total}
+        except Exception as e:
+            print(f"Error listing license plates: {e}")
+            raise
+
+    def update_license_plate(self, plate_number: str, owner_name: str = None,
+                             owner_id: str = None, vehicle_type: str = None,
+                             is_authorized: bool = None, expiry_date=None,
+                             notes: str = None) -> bool:
+        """Update license plate details"""
+        try:
+            updates = []
+            params = []
+            if owner_name is not None:
+                updates.append("owner_name = %s")
+                params.append(owner_name)
+            if owner_id is not None:
+                updates.append("owner_id = %s")
+                params.append(owner_id)
+            if vehicle_type is not None:
+                updates.append("vehicle_type = %s")
+                params.append(vehicle_type)
+            if is_authorized is not None:
+                updates.append("is_authorized = %s")
+                params.append(is_authorized)
+            if expiry_date is not None:
+                updates.append("expiry_date = %s")
+                params.append(expiry_date if expiry_date != '' else None)
+            if notes is not None:
+                updates.append("notes = %s")
+                params.append(notes)
+            if not updates:
+                return False
+            params.append(plate_number)
+            query = f"UPDATE license_plates SET {', '.join(updates)} WHERE plate_number = %s"
+            self.cursor.execute(query, params)
+            self.conn.commit()
+            return self.cursor.rowcount > 0
+        except Exception as e:
+            self.conn.rollback()
+            print(f"Error updating license plate: {e}")
+            raise
+
+    def delete_license_plate(self, plate_number: str) -> bool:
+        """Delete a license plate (cascades to access logs via FK)"""
+        try:
+            query = "DELETE FROM license_plates WHERE plate_number = %s"
+            self.cursor.execute(query, (plate_number,))
+            self.conn.commit()
+            return self.cursor.rowcount > 0
+        except Exception as e:
+            self.conn.rollback()
+            print(f"Error deleting license plate: {e}")
+            raise
+
+    def get_plate_access_history(self, plate_number: str, limit: int = 20) -> List[Dict]:
+        """Get recent access history for a license plate"""
+        try:
+            query = """
+                SELECT camera_id, confidence, vehicle_type, detected_at, is_authorized
+                FROM vehicle_access_logs
+                WHERE plate_number = %s
+                ORDER BY detected_at DESC
+                LIMIT %s
+            """
+            self.cursor.execute(query, (plate_number, limit))
+            return self.cursor.fetchall()
+        except Exception as e:
+            print(f"Error getting plate access history: {e}")
+            raise
+
+    def get_all_vehicle_types(self) -> List[str]:
+        """Get all unique vehicle types"""
+        try:
+            query = "SELECT DISTINCT vehicle_type FROM license_plates WHERE vehicle_type IS NOT NULL AND vehicle_type != '' ORDER BY vehicle_type"
+            self.cursor.execute(query)
+            return [row['vehicle_type'] for row in self.cursor.fetchall()]
+        except Exception as e:
+            print(f"Error getting vehicle types: {e}")
+            raise
+
+    # License plate related methods (legacy)
     def add_license_plate(self, plate_number: str, vehicle_type: str = None,
                          owner_name: str = None, owner_id: str = None,
                          is_authorized: bool = True, expiry_date: datetime = None,
@@ -520,16 +677,203 @@ class DatabaseManager:
             stats['total_vehicle_accesses'] = self.cursor.fetchone()['count']
             
             self.cursor.execute("""
-                SELECT COUNT(*) as count 
-                FROM vehicle_access_logs 
+                SELECT COUNT(*) as count
+                FROM vehicle_access_logs
                 WHERE is_authorized = FALSE
             """)
             stats['unauthorized_vehicle_accesses'] = self.cursor.fetchone()['count']
-            
+
+            # Alarm statistics
+            self.cursor.execute("SELECT COUNT(*) as count FROM alarms WHERE status = 'unresolved'")
+            stats['unresolved_alarms'] = self.cursor.fetchone()['count']
+
+            self.cursor.execute("SELECT COUNT(*) as count FROM alarms WHERE status = 'unresolved' AND severity = 'critical'")
+            stats['critical_alarms'] = self.cursor.fetchone()['count']
+
+            self.cursor.execute("SELECT COUNT(*) as count FROM alarms")
+            stats['total_alarms'] = self.cursor.fetchone()['count']
+
             return stats
             
         except Exception as e:
             print(f"Error getting statistics: {e}")
+            raise
+
+    # ── Alarm management methods ───────────────────────────────────
+
+    def create_alarm(self, camera_id: str, alarm_type: str, severity: str,
+                     description: str = None, snapshot: str = None,
+                     detection_metadata: Dict = None) -> int:
+        """Create a new alarm"""
+        try:
+            query = """
+                INSERT INTO alarms (camera_id, type, severity, description, snapshot, detection_metadata)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """
+            meta_json = json.dumps(detection_metadata) if detection_metadata else None
+            self.cursor.execute(query, (camera_id, alarm_type, severity, description,
+                                        snapshot, meta_json))
+            self.conn.commit()
+            return self.cursor.fetchone()['id']
+        except Exception as e:
+            self.conn.rollback()
+            print(f"Error creating alarm: {e}")
+            raise
+
+    def get_recent_alarm(self, camera_id: str, alarm_type: str,
+                         cooldown_seconds: int = 30) -> Optional[Dict]:
+        """Get the most recent alarm of same type+camera within cooldown window (for deduplication)"""
+        try:
+            query = """
+                SELECT * FROM alarms
+                WHERE camera_id = %s AND type = %s AND status = 'unresolved'
+                  AND created_at > NOW() - INTERVAL '%s seconds'
+                ORDER BY created_at DESC
+                LIMIT 1
+            """
+            self.cursor.execute(query, (camera_id, alarm_type, cooldown_seconds))
+            return self.cursor.fetchone()
+        except Exception as e:
+            print(f"Error getting recent alarm: {e}")
+            raise
+
+    def list_alarms(self, status: str = None, alarm_type: str = None,
+                    severity: str = None, camera_id: str = None,
+                    limit: int = 50, offset: int = 0) -> Dict:
+        """List alarms with filters and pagination"""
+        try:
+            conditions = []
+            params = []
+
+            if status:
+                conditions.append("status = %s")
+                params.append(status)
+            if alarm_type:
+                conditions.append("type = %s")
+                params.append(alarm_type)
+            if severity:
+                conditions.append("severity = %s")
+                params.append(severity)
+            if camera_id:
+                conditions.append("camera_id = %s")
+                params.append(camera_id)
+
+            where_clause = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+
+            count_query = f"SELECT COUNT(*) as count FROM alarms{where_clause}"
+            self.cursor.execute(count_query, params)
+            total = self.cursor.fetchone()['count']
+
+            query = f"""
+                SELECT id, camera_id, type, severity, status, description,
+                       detection_metadata, created_at, resolved_at, resolved_by, notes
+                FROM alarms
+                {where_clause}
+                ORDER BY created_at DESC
+                LIMIT %s OFFSET %s
+            """
+            params.extend([limit, offset])
+            self.cursor.execute(query, params)
+            alarms = self.cursor.fetchall()
+
+            return {"alarms": alarms, "total": total}
+        except Exception as e:
+            print(f"Error listing alarms: {e}")
+            raise
+
+    def get_alarm(self, alarm_id: int) -> Optional[Dict]:
+        """Get a single alarm by ID (including snapshot)"""
+        try:
+            query = "SELECT * FROM alarms WHERE id = %s"
+            self.cursor.execute(query, (alarm_id,))
+            return self.cursor.fetchone()
+        except Exception as e:
+            print(f"Error getting alarm: {e}")
+            raise
+
+    def update_alarm(self, alarm_id: int, status: str = None,
+                     notes: str = None, resolved_by: str = None) -> bool:
+        """Update alarm status and/or notes"""
+        try:
+            updates = []
+            params = []
+            if status is not None:
+                updates.append("status = %s")
+                params.append(status)
+                if status in ('resolved', 'false_alarm'):
+                    updates.append("resolved_at = NOW()")
+                    if resolved_by:
+                        updates.append("resolved_by = %s")
+                        params.append(resolved_by)
+            if notes is not None:
+                updates.append("notes = %s")
+                params.append(notes)
+            if not updates:
+                return False
+            params.append(alarm_id)
+            query = f"UPDATE alarms SET {', '.join(updates)} WHERE id = %s"
+            self.cursor.execute(query, params)
+            self.conn.commit()
+            return self.cursor.rowcount > 0
+        except Exception as e:
+            self.conn.rollback()
+            print(f"Error updating alarm: {e}")
+            raise
+
+    def get_alarm_stats(self) -> Dict:
+        """Get alarm statistics for dashboard"""
+        try:
+            stats = {}
+            self.cursor.execute("SELECT COUNT(*) as count FROM alarms WHERE status = 'unresolved'")
+            stats['unresolved'] = self.cursor.fetchone()['count']
+
+            self.cursor.execute("SELECT COUNT(*) as count FROM alarms WHERE status = 'unresolved' AND severity = 'critical'")
+            stats['critical_unresolved'] = self.cursor.fetchone()['count']
+
+            self.cursor.execute("SELECT COUNT(*) as count FROM alarms WHERE status = 'resolved'")
+            stats['resolved'] = self.cursor.fetchone()['count']
+
+            self.cursor.execute("SELECT COUNT(*) as count FROM alarms WHERE status = 'false_alarm'")
+            stats['false_alarm'] = self.cursor.fetchone()['count']
+
+            self.cursor.execute("""
+                SELECT type, COUNT(*) as count FROM alarms
+                WHERE status = 'unresolved'
+                GROUP BY type
+            """)
+            stats['by_type'] = {row['type']: row['count'] for row in self.cursor.fetchall()}
+
+            return stats
+        except Exception as e:
+            print(f"Error getting alarm stats: {e}")
+            raise
+
+    def bulk_update_alarms(self, alarm_ids: List[int], status: str,
+                           resolved_by: str = None) -> int:
+        """Bulk update alarm statuses"""
+        try:
+            if status in ('resolved', 'false_alarm'):
+                if resolved_by:
+                    query = """
+                        UPDATE alarms SET status = %s, resolved_at = NOW(), resolved_by = %s
+                        WHERE id = ANY(%s)
+                    """
+                    self.cursor.execute(query, (status, resolved_by, alarm_ids))
+                else:
+                    query = """
+                        UPDATE alarms SET status = %s, resolved_at = NOW()
+                        WHERE id = ANY(%s)
+                    """
+                    self.cursor.execute(query, (status, alarm_ids))
+            else:
+                query = "UPDATE alarms SET status = %s WHERE id = ANY(%s)"
+                self.cursor.execute(query, (status, alarm_ids))
+            self.conn.commit()
+            return self.cursor.rowcount
+        except Exception as e:
+            self.conn.rollback()
+            print(f"Error bulk updating alarms: {e}")
             raise
 
     # ── User management methods ──────────────────────────────────

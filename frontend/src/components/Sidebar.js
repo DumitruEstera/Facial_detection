@@ -1,16 +1,38 @@
-import React from 'react';
-import { LayoutDashboard, UserCheck, Car, FileText, BarChart3, X, Users } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { LayoutDashboard, UserCheck, Car, FileText, BarChart3, X, Users, Bell } from 'lucide-react';
+
+const API_BASE = 'http://localhost:8000';
 
 const allNavItems = [
   { id: 'dashboard', icon: LayoutDashboard, label: 'Dashboard', adminOnly: false },
+  { id: 'alarms', icon: Bell, label: 'Alarms', adminOnly: false },
   { id: 'persons', icon: UserCheck, label: 'Person Management', adminOnly: true },
-  { id: 'plate-reg', icon: Car, label: 'Register Plate', adminOnly: true },
+  { id: 'plates', icon: Car, label: 'Plate Management', adminOnly: true },
   { id: 'logs', icon: FileText, label: 'Logs', adminOnly: false },
   { id: 'stats', icon: BarChart3, label: 'Statistics', adminOnly: true },
   { id: 'users', icon: Users, label: 'User Management', adminOnly: true },
 ];
 
 const Sidebar = ({ isOpen, onClose, activeTab, onNavigate, userRole }) => {
+  const [unresolvedCount, setUnresolvedCount] = useState(0);
+
+  useEffect(() => {
+    const fetchCount = async () => {
+      try {
+        const token = localStorage.getItem('auth_token');
+        if (!token) return;
+        const res = await fetch(`${API_BASE}/api/alarms/stats`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+        const data = await res.json();
+        setUnresolvedCount(data.unresolved || 0);
+      } catch {}
+    };
+    fetchCount();
+    const interval = setInterval(fetchCount, 10000);
+    return () => clearInterval(interval);
+  }, []);
+
   const isAdmin = userRole === 'admin';
   const navItems = allNavItems.filter(item => !item.adminOnly || isAdmin);
   if (!isOpen) return null;
@@ -54,6 +76,11 @@ const Sidebar = ({ isOpen, onClose, activeTab, onNavigate, userRole }) => {
               >
                 <Icon className="w-5 h-5" />
                 <span>{item.label}</span>
+                {item.id === 'alarms' && unresolvedCount > 0 && (
+                  <span className="ml-auto px-2 py-0.5 rounded-full text-xs font-semibold bg-red-500 text-white min-w-[20px] text-center">
+                    {unresolvedCount > 99 ? '99+' : unresolvedCount}
+                  </span>
+                )}
               </button>
             );
           })}
