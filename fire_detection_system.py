@@ -52,7 +52,15 @@ class FireDetectionSystem:
         # Alert cooldown (seconds) - to avoid spamming alerts
         self.alert_cooldown = 3.0
         self.last_alert_time = {}
-        
+
+        # Multi-frame confirmation: require detections to persist across
+        # consecutive frames before triggering an alert (reduces false positives
+        # from grey objects momentarily classified as smoke).
+        self.min_consecutive_frames = 8  # frames needed to confirm a detection
+        self.frame_history = {}  # key -> {'count': int, 'last_seen_frame': int}
+        self.current_frame_number = 0
+        self.iou_match_threshold = 0.3  # IoU threshold to consider two boxes the same detection
+
         # Statistics tracking
         self.stats = {
             'total_detections': 0,
@@ -66,75 +74,93 @@ class FireDetectionSystem:
     def process_frame(self, frame: np.ndarray) -> List[Dict]:
         """
         Detect fire and smoke in a frame
-        
+
         Args:
             frame: Input frame (BGR format)
-            
+
         Returns:
             List of detection dictionaries
         """
         h, w = frame.shape[:2]
         detections = []
-        
+        self.current_frame_number += 1
+
         # Run detection with the model
         results = self.model.predict(
-            frame, 
+            frame,
             conf=self.confidence_threshold,
             iou=self.iou_threshold,
             verbose=False  # Suppress output
         )[0]
-        
+
         current_time = datetime.now()
-        
+
+        # Track which history entries were matched this frame
+        matched_keys = set()
+
         # Process detections
         if results.boxes is not None and len(results.boxes) > 0:
             for box in results.boxes:
                 # Get bounding box coordinates
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
-                
+
                 # Ensure coordinates are within frame bounds
                 x1, y1 = max(0, x1), max(0, y1)
                 x2, y2 = min(w, x2), min(h, y2)
-                
+
                 # Get class and confidence
                 cls = int(box.cls[0])
                 conf = float(box.conf[0])
-                
+
                 # Get class name
                 class_name = self.class_names.get(cls, f'unknown_{cls}')
-                
+
                 # Calculate detection area
                 detection_area = (x2 - x1) * (y2 - y1)
                 frame_area = w * h
-                
+
                 # Calculate severity
                 severity = self._calculate_severity(
                     class_name, conf, detection_area, frame_area
                 )
-                
-                # Check if we should alert (cooldown logic)
+
+                # --- Method 1: Skip low severity detections entirely ---
+                # Low severity smoke/fire detections are almost always false
+                # positives (grey objects, reflections, etc.)
+                if severity == 'low':
+                    continue
+
+                # --- Method 2: Multi-frame confirmation ---
+                # Match this detection against existing tracked detections
+                # using IoU to handle slight position shifts between frames.
+                consecutive_count = self._update_frame_history(
+                    class_name, (x1, y1, x2, y2), matched_keys
+                )
+                confirmed = consecutive_count >= self.min_consecutive_frames
+
+                # Check if we should alert (cooldown + confirmation logic)
                 should_alert = False
-                alert_key = f"{class_name}_{x1}_{y1}_{x2}_{y2}"
-                
-                if alert_key not in self.last_alert_time:
-                    should_alert = True
-                    self.last_alert_time[alert_key] = current_time
-                else:
-                    time_diff = (current_time - self.last_alert_time[alert_key]).total_seconds()
-                    if time_diff > self.alert_cooldown:
+                if confirmed:
+                    alert_key = f"{class_name}_{x1}_{y1}_{x2}_{y2}"
+                    if alert_key not in self.last_alert_time:
                         should_alert = True
                         self.last_alert_time[alert_key] = current_time
-                
+                    else:
+                        time_diff = (current_time - self.last_alert_time[alert_key]).total_seconds()
+                        if time_diff > self.alert_cooldown:
+                            should_alert = True
+                            self.last_alert_time[alert_key] = current_time
+
                 # Update statistics
                 self.stats['total_detections'] += 1
                 if class_name == 'fire':
                     self.stats['fire_detections'] += 1
                 elif class_name == 'smoke':
                     self.stats['smoke_detections'] += 1
-                
+
                 if severity == 'critical':
                     self.stats['critical_alerts'] += 1
-                
+
                 # Create detection dictionary
                 detection = {
                     'bbox': (x1, y1, x2, y2),
@@ -142,13 +168,81 @@ class FireDetectionSystem:
                     'confidence': conf,
                     'timestamp': current_time,
                     'alert': should_alert,
+                    'confirmed': confirmed,
+                    'consecutive_frames': consecutive_count,
                     'severity': severity,
                     'area_ratio': detection_area / frame_area
                 }
-                
+
                 detections.append(detection)
-        
+
+        # Expire history entries that were not matched this frame
+        # (detection disappeared, so the streak is broken)
+        expired = [k for k, v in self.frame_history.items()
+                   if v['last_seen_frame'] < self.current_frame_number]
+        for k in expired:
+            del self.frame_history[k]
+
         return detections
+
+    def _update_frame_history(self, class_name: str, bbox: Tuple[int, int, int, int],
+                              matched_keys: set) -> int:
+        """
+        Update multi-frame tracking history for a detection.
+
+        Finds the best IoU match among existing tracked detections of the same
+        class and increments its consecutive counter, or creates a new entry.
+
+        Returns:
+            The number of consecutive frames this detection has been seen.
+        """
+        best_key = None
+        best_iou = 0.0
+
+        for key, entry in self.frame_history.items():
+            if key in matched_keys:
+                continue  # already matched to another detection this frame
+            if not key.startswith(class_name + "_"):
+                continue
+            iou = self._compute_iou(bbox, entry['bbox'])
+            if iou > best_iou:
+                best_iou = iou
+                best_key = key
+
+        if best_key is not None and best_iou >= self.iou_match_threshold:
+            # Continue existing streak
+            self.frame_history[best_key]['count'] += 1
+            self.frame_history[best_key]['last_seen_frame'] = self.current_frame_number
+            self.frame_history[best_key]['bbox'] = bbox  # update position
+            matched_keys.add(best_key)
+            return self.frame_history[best_key]['count']
+        else:
+            # New detection — start tracking
+            new_key = f"{class_name}_{id(bbox)}_{self.current_frame_number}"
+            self.frame_history[new_key] = {
+                'bbox': bbox,
+                'count': 1,
+                'last_seen_frame': self.current_frame_number,
+            }
+            matched_keys.add(new_key)
+            return 1
+
+    @staticmethod
+    def _compute_iou(box_a: Tuple[int, int, int, int],
+                     box_b: Tuple[int, int, int, int]) -> float:
+        """Compute Intersection over Union between two bounding boxes."""
+        x1 = max(box_a[0], box_b[0])
+        y1 = max(box_a[1], box_b[1])
+        x2 = min(box_a[2], box_b[2])
+        y2 = min(box_a[3], box_b[3])
+
+        inter = max(0, x2 - x1) * max(0, y2 - y1)
+        if inter == 0:
+            return 0.0
+
+        area_a = (box_a[2] - box_a[0]) * (box_a[3] - box_a[1])
+        area_b = (box_b[2] - box_b[0]) * (box_b[3] - box_b[1])
+        return inter / (area_a + area_b - inter)
     
     def _calculate_severity(self, class_name: str, confidence: float, 
                            detection_area: int, frame_area: int) -> str:
@@ -168,18 +262,18 @@ class FireDetectionSystem:
         
         # Fire is more critical than smoke
         if class_name == 'fire':
-            if confidence > 0.7 and area_ratio > 0.15:
+            if confidence > 0.9 and area_ratio > 0.15:
                 return 'critical'
-            elif confidence > 0.6 and area_ratio > 0.08:
+            elif confidence > 0.85 and area_ratio > 0.08:
                 return 'high'
-            elif confidence > 0.5 or area_ratio > 0.05:
+            elif confidence > 0.8 or area_ratio > 0.05:
                 return 'medium'
             else:
                 return 'low'
         else:  # smoke
-            if confidence > 0.7 and area_ratio > 0.25:
+            if confidence > 0.9 and area_ratio > 0.25:
                 return 'high'
-            elif confidence > 0.6 and area_ratio > 0.12:
+            elif confidence > 0.8 and area_ratio > 0.12:
                 return 'medium'
             else:
                 return 'low'
@@ -332,6 +426,8 @@ class FireDetectionSystem:
             'critical_alerts': 0
         }
         self.last_alert_time.clear()
+        self.frame_history.clear()
+        self.current_frame_number = 0
 
 
 # Quick demo

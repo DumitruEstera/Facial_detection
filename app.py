@@ -1405,10 +1405,12 @@ class EnhancedSecuritySystemAPI:
                     processing_time = time.time() - start_time
                     
                     if fire_results:
-                        self.stats['fire_detections'] += len(fire_results)
-                        logger.debug(f"🔥 Detected {len(fire_results)} fire/smoke in {processing_time:.3f}s")
-                        
-                        critical = [r for r in fire_results if r.get('severity') == 'critical']
+                        confirmed = [r for r in fire_results if r.get('confirmed', False)]
+                        self.stats['fire_detections'] += len(confirmed)
+                        if confirmed:
+                            logger.debug(f"🔥 Confirmed {len(confirmed)} fire/smoke in {processing_time:.3f}s")
+
+                        critical = [r for r in confirmed if r.get('severity') == 'critical']
                         if critical:
                             logger.warning(f"🚨 CRITICAL FIRE ALERT! {len(critical)} critical detection(s)")
                     
