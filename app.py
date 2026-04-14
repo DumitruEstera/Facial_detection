@@ -13,6 +13,9 @@ Key features:
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+import csv
+import io
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Tuple
@@ -401,6 +404,10 @@ class EnhancedSecuritySystemAPI:
         self.alarm_cooldowns = {}
         self.alarm_cooldown_seconds = 30
         self.alarm_lock = threading.Lock()
+        # Detection-log rate limiting (avoid one row per frame per detection)
+        self.log_cooldowns = {}
+        self.log_cooldown_seconds = 5
+        self.log_lock = threading.Lock()
 
         # Statistics
         self.stats = {
@@ -1118,6 +1125,84 @@ class EnhancedSecuritySystemAPI:
 
         # ── Alarm management endpoints ─────────────────────────────
 
+        @self.app.get("/api/logs")
+        async def list_detection_logs(
+            type: Optional[str] = None,
+            camera_id: Optional[str] = None,
+            status: Optional[str] = None,
+            search: Optional[str] = None,
+            date_from: Optional[str] = None,
+            date_to: Optional[str] = None,
+            limit: int = 50,
+            offset: int = 0,
+            current_user: dict = Depends(get_current_user)
+        ):
+            """List detection logs with filters and pagination."""
+            try:
+                result = self.db.list_detection_logs(
+                    log_type=type, camera_id=camera_id, status=status,
+                    search=search, date_from=date_from, date_to=date_to,
+                    limit=limit, offset=offset
+                )
+                return convert_to_serializable(result)
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.get("/api/logs/stats")
+        async def detection_log_stats(
+            hours: int = 24,
+            current_user: dict = Depends(get_current_user)
+        ):
+            """Detection log statistics for dashboard cards."""
+            try:
+                return convert_to_serializable(self.db.get_detection_log_stats(hours=hours))
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.get("/api/logs/export")
+        async def export_detection_logs(
+            type: Optional[str] = None,
+            camera_id: Optional[str] = None,
+            status: Optional[str] = None,
+            search: Optional[str] = None,
+            date_from: Optional[str] = None,
+            date_to: Optional[str] = None,
+            current_user: dict = Depends(get_current_user)
+        ):
+            """Export filtered detection logs as CSV."""
+            try:
+                result = self.db.list_detection_logs(
+                    log_type=type, camera_id=camera_id, status=status,
+                    search=search, date_from=date_from, date_to=date_to,
+                    limit=10000, offset=0
+                )
+                buf = io.StringIO()
+                writer = csv.writer(buf)
+                writer.writerow(['timestamp', 'type', 'camera_id', 'subject',
+                                 'confidence', 'severity', 'status', 'details'])
+                for log in result['logs']:
+                    details = log.get('details')
+                    if isinstance(details, (dict, list)):
+                        details = json.dumps(details)
+                    writer.writerow([
+                        log.get('created_at').isoformat() if log.get('created_at') else '',
+                        log.get('type', ''),
+                        log.get('camera_id', ''),
+                        log.get('subject', '') or '',
+                        log.get('confidence', '') if log.get('confidence') is not None else '',
+                        log.get('severity', '') or '',
+                        log.get('status', '') or '',
+                        details or ''
+                    ])
+                buf.seek(0)
+                return StreamingResponse(
+                    iter([buf.getvalue()]),
+                    media_type='text/csv',
+                    headers={'Content-Disposition': 'attachment; filename="detection_logs.csv"'}
+                )
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
         @self.app.get("/api/alarms")
         async def list_alarms(
             status: Optional[str] = None,
@@ -1644,6 +1729,84 @@ class EnhancedSecuritySystemAPI:
                                 if weapon_results:
                                     final_frame = self.weapon_system.draw_detections(final_frame, weapon_results)
 
+                            # ── Persist detection logs (historical record) ──
+                            try:
+                                for r in (face_results or []):
+                                    name = r.get('name') or 'Unknown'
+                                    self._log_detection_if_needed(
+                                        camera_id, 'face',
+                                        subject=name,
+                                        confidence=r.get('confidence'),
+                                        severity='critical' if name == 'Unknown' else None,
+                                        status='unknown' if name == 'Unknown' else 'recognized',
+                                        details={
+                                            'name': name,
+                                            'employee_id': r.get('employee_id'),
+                                            'age': r.get('age'),
+                                            'gender': r.get('gender'),
+                                            'emotion': r.get('emotion'),
+                                            'bbox': r.get('bbox'),
+                                        }
+                                    )
+                                for r in (plate_results or []):
+                                    plate = r.get('plate') or r.get('plate_number')
+                                    authorised = r.get('authorised')
+                                    if authorised is None:
+                                        authorised = r.get('is_authorized')
+                                    self._log_detection_if_needed(
+                                        camera_id, 'plate',
+                                        subject=plate,
+                                        confidence=r.get('confidence'),
+                                        status=('authorized' if authorised else 'unauthorized') if authorised is not None else None,
+                                        details={
+                                            'plate': plate,
+                                            'owner': r.get('owner'),
+                                            'vehicle_type': r.get('vehicle_type'),
+                                            'authorised': authorised,
+                                        }
+                                    )
+                                for r in (fire_results or []):
+                                    cls = r.get('class') or 'fire'
+                                    self._log_detection_if_needed(
+                                        camera_id, 'fire',
+                                        subject=cls,
+                                        confidence=r.get('confidence'),
+                                        severity=r.get('severity', 'high'),
+                                        status='alert' if r.get('alert') else 'detected',
+                                        details={
+                                            'class': cls,
+                                            'area_ratio': r.get('area_ratio'),
+                                            'alert': r.get('alert'),
+                                        }
+                                    )
+                                for r in (har_results or []):
+                                    cls = r.get('class') or 'action'
+                                    if cls == 'normal':
+                                        continue
+                                    self._log_detection_if_needed(
+                                        camera_id, 'har',
+                                        subject=r.get('action_label') or cls,
+                                        confidence=r.get('confidence'),
+                                        severity=r.get('severity'),
+                                        status=r.get('severity'),
+                                        details={
+                                            'action': cls,
+                                            'action_label': r.get('action_label'),
+                                        }
+                                    )
+                                for r in (weapon_results or []):
+                                    cls = r.get('class') or 'weapon'
+                                    self._log_detection_if_needed(
+                                        camera_id, 'weapon',
+                                        subject=cls,
+                                        confidence=r.get('confidence'),
+                                        severity=r.get('severity', 'critical'),
+                                        status='threat',
+                                        details={'class': cls}
+                                    )
+                            except Exception as _log_err:
+                                logger.error(f"Detection log write failed: {_log_err}")
+
                             # ── Create alarms for detections ──────
                             # Capture a snapshot for alarms (low quality to save space)
                             snapshot_b64 = None
@@ -1931,6 +2094,32 @@ class EnhancedSecuritySystemAPI:
         except Exception as e:
             logger.error(f"Error encoding frame: {e}")
     
+    def _log_detection_if_needed(self, camera_id: str, log_type: str,
+                                 subject: str = None, confidence: float = None,
+                                 severity: str = None, status: str = None,
+                                 details: Dict = None):
+        """Persist a detection to detection_logs with per-subject cooldown."""
+        cooldown_key = f"{camera_id}:{log_type}:{subject or ''}"
+        current_time = time.time()
+        with self.log_lock:
+            last_time = self.log_cooldowns.get(cooldown_key, 0)
+            if current_time - last_time < self.log_cooldown_seconds:
+                return
+            self.log_cooldowns[cooldown_key] = current_time
+            # Opportunistic cleanup to bound dict size
+            if len(self.log_cooldowns) > 2000:
+                cutoff = current_time - (self.log_cooldown_seconds * 10)
+                self.log_cooldowns = {k: v for k, v in self.log_cooldowns.items() if v > cutoff}
+        try:
+            self.db.insert_detection_log(
+                camera_id=camera_id, log_type=log_type, subject=subject,
+                confidence=float(confidence) if confidence is not None else None,
+                severity=severity, status=status,
+                details=convert_to_serializable(details) if details else None
+            )
+        except Exception as e:
+            logger.error(f"Error inserting detection log: {e}")
+
     def _create_alarm_if_needed(self, camera_id: str, alarm_type: str,
                                 severity: str, description: str,
                                 snapshot_base64: str = None,

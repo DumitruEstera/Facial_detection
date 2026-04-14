@@ -478,7 +478,7 @@ function App() {
 
         {activeTab === 'logs' && (
           <div className="max-w-[1600px] mx-auto">
-            <Logs logs={recentLogs} />
+            <Logs />
           </div>
         )}
 

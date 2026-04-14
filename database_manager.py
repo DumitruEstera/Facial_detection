@@ -134,8 +134,26 @@ class DatabaseManager:
                 )
             """)
 
+            # Create detection logs table (historical record of every detection)
+            self.cursor.execute("""
+                CREATE TABLE IF NOT EXISTS detection_logs (
+                    id SERIAL PRIMARY KEY,
+                    camera_id VARCHAR(50) NOT NULL,
+                    type VARCHAR(20) NOT NULL,
+                    subject VARCHAR(255),
+                    confidence FLOAT,
+                    severity VARCHAR(20),
+                    status VARCHAR(30),
+                    details JSONB,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
             # Create indexes
             self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_plate_number ON license_plates(plate_number)")
+            self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_detlogs_created_at ON detection_logs(created_at DESC)")
+            self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_detlogs_type ON detection_logs(type)")
+            self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_detlogs_camera ON detection_logs(camera_id)")
             self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_vehicle_access_time ON vehicle_access_logs(detected_at)")
             self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_vehicle_camera ON vehicle_access_logs(camera_id)")
             self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_alarms_status ON alarms(status)")
@@ -874,6 +892,109 @@ class DatabaseManager:
         except Exception as e:
             self.conn.rollback()
             print(f"Error bulk updating alarms: {e}")
+            raise
+
+    # ── Detection log methods ────────────────────────────────────
+
+    def insert_detection_log(self, camera_id: str, log_type: str,
+                             subject: str = None, confidence: float = None,
+                             severity: str = None, status: str = None,
+                             details: Dict = None) -> int:
+        """Persist a single detection event for historical browsing."""
+        try:
+            query = """
+                INSERT INTO detection_logs
+                    (camera_id, type, subject, confidence, severity, status, details)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """
+            conf = float(confidence) if confidence is not None else None
+            details_json = json.dumps(details) if details else None
+            self.cursor.execute(query, (camera_id, log_type, subject, conf,
+                                        severity, status, details_json))
+            self.conn.commit()
+            return self.cursor.fetchone()['id']
+        except Exception as e:
+            self.conn.rollback()
+            print(f"Error inserting detection log: {e}")
+            raise
+
+    def list_detection_logs(self, log_type: str = None, camera_id: str = None,
+                            status: str = None, search: str = None,
+                            date_from: str = None, date_to: str = None,
+                            limit: int = 50, offset: int = 0) -> Dict:
+        """List detection logs with filters + pagination."""
+        try:
+            conditions = []
+            params = []
+
+            if log_type:
+                conditions.append("type = %s")
+                params.append(log_type)
+            if camera_id:
+                conditions.append("LOWER(camera_id) LIKE LOWER(%s)")
+                params.append(f"%{camera_id}%")
+            if status:
+                conditions.append("status = %s")
+                params.append(status)
+            if search:
+                conditions.append("LOWER(subject) LIKE LOWER(%s)")
+                params.append(f"%{search}%")
+            if date_from:
+                conditions.append("created_at >= %s")
+                params.append(date_from)
+            if date_to:
+                conditions.append("created_at <= %s")
+                params.append(date_to)
+
+            where_clause = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+
+            count_query = f"SELECT COUNT(*) as count FROM detection_logs{where_clause}"
+            self.cursor.execute(count_query, params)
+            total = self.cursor.fetchone()['count']
+
+            query = f"""
+                SELECT id, camera_id, type, subject, confidence,
+                       severity, status, details, created_at
+                FROM detection_logs
+                {where_clause}
+                ORDER BY created_at DESC
+                LIMIT %s OFFSET %s
+            """
+            params.extend([limit, offset])
+            self.cursor.execute(query, params)
+            logs = self.cursor.fetchall()
+
+            return {"logs": logs, "total": total}
+        except Exception as e:
+            print(f"Error listing detection logs: {e}")
+            raise
+
+    def get_detection_log_stats(self, hours: int = 24) -> Dict:
+        """Per-type counts over the last N hours + total."""
+        try:
+            stats = {}
+            self.cursor.execute(
+                "SELECT COUNT(*) as count FROM detection_logs "
+                "WHERE created_at > NOW() - (%s || ' hours')::interval",
+                (str(hours),)
+            )
+            stats['total_recent'] = self.cursor.fetchone()['count']
+
+            self.cursor.execute(
+                "SELECT type, COUNT(*) as count FROM detection_logs "
+                "WHERE created_at > NOW() - (%s || ' hours')::interval "
+                "GROUP BY type",
+                (str(hours),)
+            )
+            stats['by_type'] = {row['type']: row['count'] for row in self.cursor.fetchall()}
+
+            self.cursor.execute("SELECT COUNT(*) as count FROM detection_logs")
+            stats['total'] = self.cursor.fetchone()['count']
+            stats['window_hours'] = hours
+            return stats
+        except Exception as e:
+            print(f"Error getting detection log stats: {e}")
             raise
 
     # ── User management methods ──────────────────────────────────
