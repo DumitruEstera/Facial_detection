@@ -329,40 +329,6 @@ class WeaponDetectionSystem:
                 cv2.putText(output, text, (x1 + 5, y_pos),
                            font, font_scale, (255, 255, 255), font_thickness)
 
-            # Add alert icon if this is a new alert
-            if detection.get('alert', False):
-                alert_text = "!!! WEAPON ALERT !!!"
-                (alert_w, alert_h), _ = cv2.getTextSize(
-                    alert_text, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 3
-                )
-                alert_x = (x1 + x2 - alert_w) // 2
-                alert_y = (y1 + y2) // 2
-
-                # Draw alert background
-                cv2.rectangle(output,
-                             (alert_x - 10, alert_y - alert_h - 10),
-                             (alert_x + alert_w + 10, alert_y + 10),
-                             (0, 0, 255), -1)
-
-                # Draw alert text
-                cv2.putText(output, alert_text, (alert_x, alert_y),
-                           cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 3)
-
-        # Draw overall warning if critical detections exist
-        critical_detections = [d for d in detections if d['severity'] == 'critical']
-        if critical_detections:
-            warning_text = "CRITICAL WEAPON ALERT!"
-            (warn_w, warn_h), _ = cv2.getTextSize(
-                warning_text, cv2.FONT_HERSHEY_SIMPLEX, 1.2, 3
-            )
-
-            # Draw at top center
-            warn_x = (output.shape[1] - warn_w) // 2
-            cv2.rectangle(output, (warn_x - 20, 10),
-                         (warn_x + warn_w + 20, 50), (0, 0, 255), -1)
-            cv2.putText(output, warning_text, (warn_x, 40),
-                       cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 3)
-
         return output
 
     def get_statistics(self) -> Dict:
