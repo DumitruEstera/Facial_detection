@@ -8,7 +8,7 @@ YOLOv8 model trained for weapon detection
 import cv2
 import numpy as np
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 from datetime import datetime
 from ultralytics import YOLO
 import os
@@ -39,13 +39,26 @@ class WeaponDetectionSystem:
         self.class_names = self.model.names if self.model.names else {0: 'weapon'}
         print(f"   Model classes: {self.class_names}")
 
-        # Detection thresholds
-        self.confidence_threshold = 0.4
+        # Base model confidence threshold (kept low so candidates reach the
+        # stricter post-filter below).
+        self.confidence_threshold = 0.3
         self.iou_threshold = 0.45
+
+        # Stricter post-filter confidence: a detection must exceed this to
+        # be considered. Raised to suppress phone-edge false positives.
+        self.min_confidence = 0.7
 
         # Alert cooldown (seconds) - to avoid spamming alerts
         self.alert_cooldown = 3.0
         self.last_alert_time = {}
+
+        # Multi-frame temporal voting: a detection must persist across this
+        # many consecutive frames before it is considered confirmed and
+        # allowed to raise an alert.
+        self.min_consecutive_frames = 6
+        self.frame_history = {}  # key -> {'bbox', 'count', 'last_seen_frame'}
+        self.current_frame_number = 0
+        self.iou_match_threshold = 0.3  # IoU to treat two boxes as the same track
 
         # Statistics tracking
         self.stats = {
@@ -67,6 +80,7 @@ class WeaponDetectionSystem:
         """
         h, w = frame.shape[:2]
         detections = []
+        self.current_frame_number += 1
 
         # Run detection with the model
         results = self.model.predict(
@@ -77,6 +91,10 @@ class WeaponDetectionSystem:
         )[0]
 
         current_time = datetime.now()
+
+        # Track which history entries were matched this frame so each
+        # tracked box is consumed by at most one current detection.
+        matched_keys = set()
 
         # Process detections
         if results.boxes is not None and len(results.boxes) > 0:
@@ -92,8 +110,15 @@ class WeaponDetectionSystem:
                 cls = int(box.cls[0])
                 conf = float(box.conf[0])
 
-                # Get class name
-                class_name = self.class_names.get(cls, f'weapon_{cls}')
+                # Model has a single class: 'weapon'.
+                class_name = self.class_names.get(cls, 'weapon')
+
+                # --- Confidence filter ---
+                # Drop low-confidence candidates. Phones seen from the side
+                # can score low-to-mid confidence as weapons, so the bar
+                # is deliberately higher than the raw model threshold.
+                if conf < self.min_confidence:
+                    continue
 
                 # Calculate detection area
                 detection_area = (x2 - x1) * (y2 - y1)
@@ -102,18 +127,31 @@ class WeaponDetectionSystem:
                 # Calculate severity - weapons are always high priority
                 severity = self._calculate_severity(class_name, conf, detection_area, frame_area)
 
-                # Check if we should alert (cooldown logic)
-                should_alert = False
-                alert_key = f"{class_name}_{x1}_{y1}_{x2}_{y2}"
+                # --- Multi-frame temporal voting ---
+                # Require the same detection to persist across several
+                # consecutive frames before it can raise an alert.
+                consecutive_count, track_key = self._update_frame_history(
+                    class_name, (x1, y1, x2, y2), matched_keys
+                )
+                confirmed = consecutive_count >= self.min_consecutive_frames
 
-                if alert_key not in self.last_alert_time:
+                # Unconfirmed candidates are tracked silently — don't surface
+                # them to the UI, since showing a "WEAPON" box for a phone
+                # is exactly the false alarm we're trying to eliminate.
+                if not confirmed:
+                    continue
+
+                # Alert cooldown keyed by track, not by exact bbox (bboxes
+                # jitter every frame, which previously defeated the cooldown).
+                should_alert = False
+                if track_key not in self.last_alert_time:
                     should_alert = True
-                    self.last_alert_time[alert_key] = current_time
+                    self.last_alert_time[track_key] = current_time
                 else:
-                    time_diff = (current_time - self.last_alert_time[alert_key]).total_seconds()
+                    time_diff = (current_time - self.last_alert_time[track_key]).total_seconds()
                     if time_diff > self.alert_cooldown:
                         should_alert = True
-                        self.last_alert_time[alert_key] = current_time
+                        self.last_alert_time[track_key] = current_time
 
                 # Update statistics
                 self.stats['total_detections'] += 1
@@ -127,13 +165,76 @@ class WeaponDetectionSystem:
                     'confidence': conf,
                     'timestamp': current_time,
                     'alert': should_alert,
+                    'confirmed': confirmed,
+                    'consecutive_frames': consecutive_count,
                     'severity': severity,
                     'area_ratio': detection_area / frame_area
                 }
 
                 detections.append(detection)
 
+        # Expire tracks that were not matched this frame — the streak breaks
+        # as soon as the detection disappears for one frame.
+        expired = [k for k, v in self.frame_history.items()
+                   if v['last_seen_frame'] < self.current_frame_number]
+        for k in expired:
+            del self.frame_history[k]
+
         return detections
+
+    def _update_frame_history(self, class_name: str,
+                              bbox: Tuple[int, int, int, int],
+                              matched_keys: set) -> Tuple[int, str]:
+        """
+        Match `bbox` against existing tracks of the same class via IoU and
+        increment its consecutive counter, or open a new track.
+
+        Returns (consecutive_count, track_key).
+        """
+        best_key: Optional[str] = None
+        best_iou = 0.0
+
+        for key, entry in self.frame_history.items():
+            if key in matched_keys:
+                continue
+            if not key.startswith(class_name + "_"):
+                continue
+            iou = self._compute_iou(bbox, entry['bbox'])
+            if iou > best_iou:
+                best_iou = iou
+                best_key = key
+
+        if best_key is not None and best_iou >= self.iou_match_threshold:
+            self.frame_history[best_key]['count'] += 1
+            self.frame_history[best_key]['last_seen_frame'] = self.current_frame_number
+            self.frame_history[best_key]['bbox'] = bbox
+            matched_keys.add(best_key)
+            return self.frame_history[best_key]['count'], best_key
+
+        new_key = f"{class_name}_{id(bbox)}_{self.current_frame_number}"
+        self.frame_history[new_key] = {
+            'bbox': bbox,
+            'count': 1,
+            'last_seen_frame': self.current_frame_number,
+        }
+        matched_keys.add(new_key)
+        return 1, new_key
+
+    @staticmethod
+    def _compute_iou(box_a: Tuple[int, int, int, int],
+                     box_b: Tuple[int, int, int, int]) -> float:
+        x1 = max(box_a[0], box_b[0])
+        y1 = max(box_a[1], box_b[1])
+        x2 = min(box_a[2], box_b[2])
+        y2 = min(box_a[3], box_b[3])
+
+        inter = max(0, x2 - x1) * max(0, y2 - y1)
+        if inter == 0:
+            return 0.0
+
+        area_a = (box_a[2] - box_a[0]) * (box_a[3] - box_a[1])
+        area_b = (box_b[2] - box_b[0]) * (box_b[3] - box_b[1])
+        return inter / (area_a + area_b - inter)
 
     def _calculate_severity(self, class_name: str, confidence: float,
                            detection_area: int, frame_area: int) -> str:
@@ -189,7 +290,7 @@ class WeaponDetectionSystem:
             cv2.rectangle(output, (x1, y1), (x2, y2), color, thickness)
 
             # Prepare labels
-            label = f"WEAPON: {class_name.upper()}"
+            label = "WEAPON DETECTED"
             conf_label = f"Conf: {confidence:.2f}"
             severity_label = f"Severity: {severity.upper()}"
 
@@ -271,6 +372,9 @@ class WeaponDetectionSystem:
             'confidence_threshold': self.confidence_threshold,
             'iou_threshold': self.iou_threshold,
             'alert_cooldown': self.alert_cooldown,
+            'min_confidence': self.min_confidence,
+            'min_consecutive_frames': self.min_consecutive_frames,
+            'active_tracks': len(self.frame_history),
             'active_alerts': len(self.last_alert_time),
             **self.stats
         }
@@ -282,3 +386,5 @@ class WeaponDetectionSystem:
             'critical_alerts': 0
         }
         self.last_alert_time.clear()
+        self.frame_history.clear()
+        self.current_frame_number = 0
