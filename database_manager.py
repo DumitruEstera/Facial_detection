@@ -938,8 +938,9 @@ class DatabaseManager:
             details_json = json.dumps(details) if details else None
             self.cursor.execute(query, (camera_id, log_type, subject, conf,
                                         severity, status, details_json))
+            row = self.cursor.fetchone()
             self.conn.commit()
-            return self.cursor.fetchone()['id']
+            return row['id']
         except Exception as e:
             self.conn.rollback()
             print(f"Error inserting detection log: {e}")
