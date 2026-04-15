@@ -81,7 +81,7 @@ def upscale_if_small(crop: np.ndarray,
         upscaled = cv2.resize(crop, (new_w, new_h), 
                              interpolation=cv2.INTER_CUBIC)
         
-        print(f"📏 Upscaled plate: {w}×{h} → {new_w}×{new_h} (scale: {scale:.2f}x)")
+        #print(f"📏 Upscaled plate: {w}×{h} → {new_w}×{new_h} (scale: {scale:.2f}x)")
         return upscaled
     
     return crop
