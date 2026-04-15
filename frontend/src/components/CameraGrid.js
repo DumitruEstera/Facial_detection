@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
-import { X, Video, VideoOff, Plus, Smartphone } from 'lucide-react';
+import { X, Video, VideoOff, Plus, Smartphone, Monitor } from 'lucide-react';
 
-const CameraGrid = ({ cameras = [], alerts = [], onAddIpCamera, onRemoveIpCamera }) => {
+const CameraGrid = ({ cameras = [], alerts = [], onAddIpCamera, onRemoveIpCamera, systemStatus, onStartCamera, onStopCamera }) => {
+  const cam01Streaming = systemStatus?.cam01_streaming || false;
   const [selectedCamera, setSelectedCamera] = useState(null);
   const [showConnectForm, setShowConnectForm] = useState(false);
   const [ip, setIp] = useState('');
@@ -56,6 +57,7 @@ const CameraGrid = ({ cameras = [], alerts = [], onAddIpCamera, onRemoveIpCamera
     const isActive = camera.status === 'active' && camera.stream;
     const hasActiveAlert = hasAlert(camera.id);
     const isIpCamera = camera.id !== 'CAM-01';
+    const isLaptopCam = camera.id === 'CAM-01';
 
     return (
       <div
@@ -89,12 +91,28 @@ const CameraGrid = ({ cameras = [], alerts = [], onAddIpCamera, onRemoveIpCamera
           </div>
 
           {/* Timestamp */}
-          {isActive && (
+          {isActive && !isLaptopCam && (
             <div className="absolute top-3 right-3">
               <span className="px-2 py-1 bg-black/50 backdrop-blur-md text-white text-[10px] font-mono rounded">
                 {timestamp}
               </span>
             </div>
+          )}
+
+          {/* Start/Stop button for laptop camera */}
+          {isLaptopCam && onStartCamera && onStopCamera && (
+            <button
+              onClick={(e) => { e.stopPropagation(); cam01Streaming ? onStopCamera() : onStartCamera(); }}
+              className={`absolute top-3 right-3 z-10 flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                cam01Streaming
+                  ? 'bg-red-500/90 text-white hover:bg-red-600'
+                  : 'bg-[#3374D0] text-white hover:bg-[#2861B0]'
+              }`}
+              title={cam01Streaming ? 'Stop Laptop Camera' : 'Start Laptop Camera'}
+            >
+              <Monitor className="w-3.5 h-3.5" />
+              <span>{cam01Streaming ? 'Stop' : 'Start'}</span>
+            </button>
           )}
 
           {/* Disconnect button for IP cameras */}

@@ -410,10 +410,6 @@ function App() {
       <Header
         onMenuClick={() => setIsSidebarOpen(true)}
         isConnected={isConnected}
-        systemStatus={systemStatus}
-        onStartCamera={startCamera}
-        onStopCamera={stopCamera}
-        activeTab={activeTab}
         onLogout={handleLogout}
         userName={userName}
         userRole={userRole}
@@ -437,6 +433,9 @@ function App() {
                 alerts={alerts}
                 onAddIpCamera={addIpCamera}
                 onRemoveIpCamera={removeIpCamera}
+                systemStatus={systemStatus}
+                onStartCamera={startCamera}
+                onStopCamera={stopCamera}
               />
             </div>
 
