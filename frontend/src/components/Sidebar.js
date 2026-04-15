@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { LayoutDashboard, UserCheck, Car, FileText, BarChart3, X, Users, Bell } from 'lucide-react';
+import { LayoutDashboard, UserCheck, Car, FileText, BarChart3, X, Users, Bell, MapPin, Video } from 'lucide-react';
 
 const API_BASE = 'http://localhost:8000';
 
@@ -7,6 +7,8 @@ const allNavItems = [
   { id: 'dashboard', icon: LayoutDashboard, label: 'Dashboard', adminOnly: false },
   { id: 'alarms', icon: Bell, label: 'Alarms', adminOnly: false },
   { id: 'persons', icon: UserCheck, label: 'Person Management', adminOnly: true },
+  { id: 'zones', icon: MapPin, label: 'Zone Management', adminOnly: true },
+  { id: 'cameras', icon: Video, label: 'Camera Management', adminOnly: true },
   { id: 'plates', icon: Car, label: 'Plate Management', adminOnly: true },
   { id: 'logs', icon: FileText, label: 'Logs', adminOnly: false },
   { id: 'stats', icon: BarChart3, label: 'Statistics', adminOnly: true },

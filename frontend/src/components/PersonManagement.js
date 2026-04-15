@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Users, UserPlus, Trash2, Edit3, X, Check, Search, Upload, Eye, ChevronLeft, ChevronRight, Camera, Clock, MapPin } from 'lucide-react';
+import { Users, UserPlus, Trash2, Edit3, X, Check, Search, Upload, Eye, ChevronLeft, ChevronRight, Camera, Clock, MapPin, Lock } from 'lucide-react';
 
 const API_BASE = 'http://localhost:8000';
 
@@ -33,10 +33,37 @@ const PersonManagement = () => {
   const [regName, setRegName] = useState('');
   const [regEmployeeId, setRegEmployeeId] = useState('');
   const [regDepartment, setRegDepartment] = useState('');
+  const [regZones, setRegZones] = useState([]);
 
   // Edit form state
   const [editName, setEditName] = useState('');
   const [editDepartment, setEditDepartment] = useState('');
+  const [editZones, setEditZones] = useState([]);
+
+  // All zones available for assignment
+  const [zones, setZones] = useState([]);
+
+  const fetchZones = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/zones`, { headers: getAuthHeaders() });
+      if (res.ok) {
+        const data = await res.json();
+        setZones(data.zones || []);
+      }
+    } catch (e) {
+      console.error('Error fetching zones:', e);
+    }
+  }, []);
+
+  useEffect(() => { fetchZones(); }, [fetchZones]);
+
+  const toggleZoneIn = (list, setter, zoneName) => {
+    if (list.includes(zoneName)) {
+      setter(list.filter(z => z !== zoneName));
+    } else {
+      setter([...list, zoneName]);
+    }
+  };
 
   // Detail view state
   const [personDetail, setPersonDetail] = useState(null);
@@ -106,7 +133,7 @@ const PersonManagement = () => {
           name: regName,
           employee_id: regEmployeeId,
           department: regDepartment || null,
-          authorized_zones: []
+          authorized_zones: regZones
         })
       });
       const data = await response.json();
@@ -116,6 +143,7 @@ const PersonManagement = () => {
         setRegName('');
         setRegEmployeeId('');
         setRegDepartment('');
+        setRegZones([]);
         fetchPersons();
         fetchDepartments();
       } else {
@@ -131,6 +159,7 @@ const PersonManagement = () => {
       const body = {};
       if (editName) body.name = editName;
       if (editDepartment !== undefined) body.department = editDepartment;
+      body.authorized_zones = editZones;
 
       const response = await fetch(`${API_BASE}/api/persons/${personId}`, {
         method: 'PUT',
@@ -229,6 +258,7 @@ const PersonManagement = () => {
     setEditingPerson(person.id);
     setEditName(person.name);
     setEditDepartment(person.department || '');
+    setEditZones(Array.isArray(person.authorized_zones) ? person.authorized_zones : []);
   };
 
   const totalPages = Math.ceil(total / LIMIT);
@@ -304,6 +334,33 @@ const PersonManagement = () => {
                 placeholder="Enter department"
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#3374D0] focus:border-transparent text-sm"
               />
+            </div>
+            <div className="sm:col-span-3">
+              <label className="block text-sm font-medium text-gray-700 mb-1">Authorized Zones</label>
+              {zones.length === 0 ? (
+                <p className="text-xs text-gray-500">No zones defined. Create zones first in Zone Management.</p>
+              ) : (
+                <div className="flex flex-wrap gap-2">
+                  {zones.map(z => {
+                    const active = regZones.includes(z.name);
+                    return (
+                      <button
+                        type="button"
+                        key={z.id}
+                        onClick={() => toggleZoneIn(regZones, setRegZones, z.name)}
+                        className={`px-3 py-1.5 text-xs rounded-full border transition-colors inline-flex items-center gap-1 ${
+                          active
+                            ? 'bg-[#3374D0] text-white border-[#3374D0]'
+                            : 'bg-white text-slate-700 border-gray-300 hover:bg-gray-50'
+                        }`}
+                      >
+                        {z.is_restricted && <Lock className="w-3 h-3" />}
+                        {z.name}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
             <div className="sm:col-span-3 flex gap-3">
               <button
@@ -418,7 +475,7 @@ const PersonManagement = () => {
                         <button
                           onClick={() => handleUpdate(person.id)}
                           className="p-1.5 text-green-600 hover:bg-green-50 rounded transition-colors"
-                          title="Save"
+                          title="Save (including zones below)"
                         >
                           <Check className="w-4 h-4" />
                         </button>
@@ -480,6 +537,41 @@ const PersonManagement = () => {
                   </td>
                 </tr>
 
+                {/* Edit-zones row */}
+                {editingPerson === person.id && (
+                  <tr>
+                    <td colSpan="6" className="px-6 py-3 bg-blue-50/40 border-t border-blue-100">
+                      <div>
+                        <div className="text-xs font-medium text-slate-700 mb-2">Authorized Zones</div>
+                        {zones.length === 0 ? (
+                          <p className="text-xs text-gray-500">No zones defined yet.</p>
+                        ) : (
+                          <div className="flex flex-wrap gap-2">
+                            {zones.map(z => {
+                              const active = editZones.includes(z.name);
+                              return (
+                                <button
+                                  type="button"
+                                  key={z.id}
+                                  onClick={() => toggleZoneIn(editZones, setEditZones, z.name)}
+                                  className={`px-3 py-1 text-xs rounded-full border transition-colors inline-flex items-center gap-1 ${
+                                    active
+                                      ? 'bg-[#3374D0] text-white border-[#3374D0]'
+                                      : 'bg-white text-slate-700 border-gray-300 hover:bg-gray-50'
+                                  }`}
+                                >
+                                  {z.is_restricted && <Lock className="w-3 h-3" />}
+                                  {z.name}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                )}
+
                 {/* Detail Row */}
                 {selectedPerson === person.id && personDetail && (
                   <tr>
@@ -511,6 +603,21 @@ const PersonManagement = () => {
                                 {person.face_count} registered
                               </span>
                             </div>
+                          </div>
+
+                          <div className="mt-3">
+                            <div className="text-xs font-medium text-slate-600 mb-1.5">Authorized Zones</div>
+                            {(personDetail.authorized_zones && personDetail.authorized_zones.length > 0) ? (
+                              <div className="flex flex-wrap gap-1.5">
+                                {personDetail.authorized_zones.map((zn) => (
+                                  <span key={zn} className="px-2 py-0.5 text-xs rounded-full bg-blue-50 text-blue-700 border border-blue-200 inline-flex items-center gap-1">
+                                    <MapPin className="w-3 h-3" />{zn}
+                                  </span>
+                                ))}
+                              </div>
+                            ) : (
+                              <span className="text-xs text-gray-400">None</span>
+                            )}
                           </div>
 
                           {person.face_count === 0 && (

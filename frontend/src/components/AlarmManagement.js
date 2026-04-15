@@ -26,6 +26,7 @@ const typeLabels = {
   fire: 'Fire / Smoke',
   har: 'Action Recognition',
   weapon: 'Weapon Detected',
+  unauthorized_zone: 'Restricted Zone',
 };
 
 const AlarmManagement = () => {
@@ -203,6 +204,7 @@ const AlarmManagement = () => {
           <option value="fire">Fire</option>
           <option value="har">Action</option>
           <option value="weapon">Weapon</option>
+          <option value="unauthorized_zone">Restricted Zone</option>
         </select>
         <select
           className="px-3 py-2 rounded-lg border border-gray-200 text-sm bg-white"
@@ -285,6 +287,7 @@ const AlarmManagement = () => {
                       alarm.type === 'face' ? 'bg-blue-50 text-blue-700 border-blue-200' :
                       alarm.type === 'fire' ? 'bg-red-50 text-red-700 border-red-200' :
                       alarm.type === 'har' ? 'bg-purple-50 text-purple-700 border-purple-200' :
+                      alarm.type === 'unauthorized_zone' ? 'bg-amber-50 text-amber-700 border-amber-200' :
                       'bg-rose-50 text-rose-700 border-rose-200'
                     }`}>
                       {typeLabels[alarm.type] || alarm.type}

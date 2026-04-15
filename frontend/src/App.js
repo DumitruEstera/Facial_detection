@@ -14,6 +14,8 @@ import Logs from './components/Logs';
 import AlarmManagement from './components/AlarmManagement';
 import Statistics from './components/Statistics';
 import UserManagement from './components/UserManagement';
+import ZoneManagement from './components/ZoneManagement';
+import CameraManagement from './components/CameraManagement';
 
 // API base URL
 const API_BASE = 'http://localhost:8000';
@@ -491,6 +493,18 @@ function App() {
         {activeTab === 'users' && isAdmin && (
           <div className="max-w-[1600px] mx-auto">
             <UserManagement />
+          </div>
+        )}
+
+        {activeTab === 'zones' && isAdmin && (
+          <div className="max-w-[1600px] mx-auto">
+            <ZoneManagement />
+          </div>
+        )}
+
+        {activeTab === 'cameras' && isAdmin && (
+          <div className="max-w-[1600px] mx-auto">
+            <CameraManagement />
           </div>
         )}
       </main>

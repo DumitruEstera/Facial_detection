@@ -96,6 +96,31 @@ class UpdateUserRequest(BaseModel):
     full_name: Optional[str] = None
     password: Optional[str] = None
 
+class ZoneCreateRequest(BaseModel):
+    name: str
+    description: Optional[str] = None
+    is_restricted: bool = False
+
+class ZoneUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    is_restricted: Optional[bool] = None
+
+class CameraCreateRequest(BaseModel):
+    camera_id: str
+    name: Optional[str] = None
+    zone_id: Optional[int] = None
+    location: Optional[str] = None
+    stream_url: Optional[str] = None
+    camera_type: Optional[str] = 'ip'
+
+class CameraUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    zone_id: Optional[int] = None
+    clear_zone: Optional[bool] = False
+    location: Optional[str] = None
+    stream_url: Optional[str] = None
+
 class UpdateAlarmRequest(BaseModel):
     status: Optional[str] = None
     notes: Optional[str] = None
@@ -404,6 +429,20 @@ class EnhancedSecuritySystemAPI:
         self.alarm_cooldowns = {}
         self.alarm_cooldown_seconds = 30
         self.alarm_lock = threading.Lock()
+
+        # Zone authorization caches (refreshed on change or every 30s)
+        self._zone_cache_lock = threading.Lock()
+        self._camera_zone_cache = {}      # camera_id -> {zone_id, zone_name, is_restricted} or None
+        self._person_zones_cache = {}     # employee_id -> set(zone_name)
+        self._zone_cache_refreshed_at = 0
+        self._zone_cache_ttl = 30.0
+
+        # Ensure CAM-01 (laptop) exists in camera registry
+        try:
+            self.db.upsert_camera(camera_id="CAM-01", name="Laptop Camera",
+                                  location="Laptop Camera", camera_type='local')
+        except Exception as e:
+            logger.warning(f"Could not upsert CAM-01 into cameras registry: {e}")
         # Detection-log rate limiting (avoid one row per frame per detection)
         self.log_cooldowns = {}
         self.log_cooldown_seconds = 5
@@ -585,7 +624,17 @@ class EnhancedSecuritySystemAPI:
                         "location": location,
                         "active": True,
                     }
-                
+
+                # Persist into the cameras registry so zone assignment survives restart
+                try:
+                    self.db.upsert_camera(
+                        camera_id=camera_id, name=location,
+                        location=location, stream_url=url, camera_type='ip'
+                    )
+                    self._refresh_zone_caches(force=True)
+                except Exception as _e:
+                    logger.warning(f"Could not persist camera {camera_id}: {_e}")
+
                 logger.info(f"📱 IP Camera added: {camera_id} -> {url}")
                 return {
                     "status": "success",
@@ -755,6 +804,7 @@ class EnhancedSecuritySystemAPI:
                     department=person.department,
                     authorized_zones=person.authorized_zones
                 )
+                self._refresh_zone_caches(force=True)
                 return {
                     "status": "success",
                     "message": f"Person {person.name} registered successfully",
@@ -817,6 +867,7 @@ class EnhancedSecuritySystemAPI:
                     authorized_zones=data.authorized_zones
                 )
                 if updated:
+                    self._refresh_zone_caches(force=True)
                     return {"status": "success", "message": "Person updated successfully"}
                 return {"status": "info", "message": "No changes made"}
             except HTTPException:
@@ -1118,6 +1169,143 @@ class EnhancedSecuritySystemAPI:
                     raise HTTPException(status_code=400, detail="Password must be at least 4 characters")
                 self.db.update_user(user_id=current_user["user_id"], password=new_password)
                 return {"status": "success", "message": "Password changed"}
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        # ── Zones management endpoints ─────────────────────────────
+
+        @self.app.get("/api/zones")
+        async def list_zones(current_user: dict = Depends(get_current_user)):
+            """List all zones (available to any logged-in user for dropdowns)."""
+            try:
+                zones = self.db.list_zones()
+                return {"zones": convert_to_serializable(zones)}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.post("/api/zones")
+        async def create_zone(req: ZoneCreateRequest,
+                              current_user: dict = Depends(require_admin)):
+            try:
+                if not req.name.strip():
+                    raise HTTPException(status_code=400, detail="Zone name is required")
+                zone_id = self.db.create_zone(
+                    name=req.name.strip(),
+                    description=req.description,
+                    is_restricted=req.is_restricted,
+                )
+                self._refresh_zone_caches(force=True)
+                return {"status": "success", "zone_id": zone_id,
+                        "message": f"Zone '{req.name}' created"}
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.put("/api/zones/{zone_id}")
+        async def update_zone(zone_id: int, req: ZoneUpdateRequest,
+                              current_user: dict = Depends(require_admin)):
+            try:
+                updated = self.db.update_zone(
+                    zone_id,
+                    name=req.name.strip() if req.name else None,
+                    description=req.description,
+                    is_restricted=req.is_restricted,
+                )
+                self._refresh_zone_caches(force=True)
+                if updated:
+                    return {"status": "success", "message": "Zone updated"}
+                return {"status": "info", "message": "No changes made"}
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.delete("/api/zones/{zone_id}")
+        async def delete_zone(zone_id: int,
+                              current_user: dict = Depends(require_admin)):
+            try:
+                deleted = self.db.delete_zone(zone_id)
+                self._refresh_zone_caches(force=True)
+                if deleted:
+                    return {"status": "success", "message": "Zone deleted"}
+                raise HTTPException(status_code=404, detail="Zone not found")
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        # ── Camera registry endpoints ──────────────────────────────
+
+        @self.app.get("/api/cameras-db")
+        async def list_cameras_db(current_user: dict = Depends(get_current_user)):
+            """List all cameras with their zone assignments."""
+            try:
+                cameras = self.db.list_cameras_db()
+                return {"cameras": convert_to_serializable(cameras)}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.post("/api/cameras-db")
+        async def create_camera_entry(req: CameraCreateRequest,
+                                       current_user: dict = Depends(require_admin)):
+            try:
+                camera_id = req.camera_id.strip()
+                if not camera_id:
+                    raise HTTPException(status_code=400, detail="camera_id is required")
+                cid = self.db.upsert_camera(
+                    camera_id=camera_id,
+                    name=req.name,
+                    zone_id=req.zone_id,
+                    location=req.location,
+                    stream_url=req.stream_url,
+                    camera_type=req.camera_type or 'ip',
+                )
+                self._refresh_zone_caches(force=True)
+                return {"status": "success", "id": cid, "camera_id": camera_id}
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.put("/api/cameras-db/{camera_id}")
+        async def update_camera_entry(camera_id: str, req: CameraUpdateRequest,
+                                       current_user: dict = Depends(require_admin)):
+            try:
+                zone_arg = ...
+                if req.clear_zone:
+                    zone_arg = None
+                elif req.zone_id is not None:
+                    zone_arg = req.zone_id
+                updated = self.db.update_camera(
+                    camera_id,
+                    name=req.name,
+                    zone_id=zone_arg,
+                    location=req.location,
+                    stream_url=req.stream_url,
+                )
+                self._refresh_zone_caches(force=True)
+                if updated:
+                    return {"status": "success", "message": "Camera updated"}
+                raise HTTPException(status_code=404, detail="Camera not found or no changes")
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.delete("/api/cameras-db/{camera_id}")
+        async def delete_camera_entry(camera_id: str,
+                                       current_user: dict = Depends(require_admin)):
+            try:
+                deleted = self.db.delete_camera(camera_id)
+                self._refresh_zone_caches(force=True)
+                if deleted:
+                    return {"status": "success", "message": "Camera deleted"}
+                raise HTTPException(status_code=404, detail="Camera not found")
             except HTTPException:
                 raise
             except Exception as e:
@@ -1845,6 +2033,19 @@ class EnhancedSecuritySystemAPI:
                                     weapon_results):
                                 has_alarm = True
 
+                            # Also flag when any face (unknown or recognized-but-unauthorized)
+                            # appears in a restricted zone, so snapshot is captured.
+                            if not has_alarm and face_results:
+                                zone_info = self._get_camera_zone_info(camera_id)
+                                if zone_info and zone_info.get('is_restricted'):
+                                    for r in face_results:
+                                        name = r.get('name') or 'Unknown'
+                                        emp = r.get('employee_id')
+                                        if name == 'Unknown' or not emp or \
+                                           not self._person_authorized_for_zone(emp, zone_info['zone_name']):
+                                            has_alarm = True
+                                            break
+
                             if has_alarm:
                                 try:
                                     snap_frame = final_frame
@@ -1867,6 +2068,12 @@ class EnhancedSecuritySystemAPI:
                                             snapshot_b64,
                                             {'confidence': r.get('confidence'), 'bbox': r.get('bbox')}
                                         )
+
+                            # Zone authorization check: recognized person in restricted zone
+                            try:
+                                self._check_zone_authorization(camera_id, face_results, snapshot_b64)
+                            except Exception as _zerr:
+                                logger.error(f"Zone authorization check failed: {_zerr}")
 
                             # Fire alarms
                             if fire_results:
@@ -2168,6 +2375,138 @@ class EnhancedSecuritySystemAPI:
             logger.info(f"🚨 Alarm created: [{severity.upper()}] {alarm_type} on {camera_id} — {description}")
         except Exception as e:
             logger.error(f"Error creating alarm: {e}")
+
+    def _refresh_zone_caches(self, force: bool = False):
+        """Refresh camera→zone and person→zones caches (TTL-based)."""
+        now = time.time()
+        with self._zone_cache_lock:
+            if not force and (now - self._zone_cache_refreshed_at) < self._zone_cache_ttl:
+                return
+            try:
+                cameras_db = self.db.list_cameras_db()
+                cam_map = {}
+                for c in cameras_db:
+                    if c.get('zone_id') is not None:
+                        cam_map[c['camera_id']] = {
+                            'zone_id': c['zone_id'],
+                            'zone_name': c['zone_name'],
+                            'is_restricted': bool(c['zone_is_restricted']),
+                        }
+                    else:
+                        cam_map[c['camera_id']] = None
+                self._camera_zone_cache = cam_map
+
+                self.db.cursor.execute(
+                    "SELECT employee_id, authorized_zones FROM persons"
+                )
+                person_map = {}
+                for row in self.db.cursor.fetchall():
+                    emp = row.get('employee_id')
+                    zones = row.get('authorized_zones') or []
+                    if emp:
+                        person_map[emp] = set(zones)
+                self._person_zones_cache = person_map
+                self._zone_cache_refreshed_at = now
+            except Exception as e:
+                logger.error(f"Error refreshing zone caches: {e}")
+
+    def _get_camera_zone_info(self, camera_id: str):
+        """Return zone info dict for a camera or None."""
+        self._refresh_zone_caches()
+        with self._zone_cache_lock:
+            if camera_id in self._camera_zone_cache:
+                return self._camera_zone_cache[camera_id]
+        # Not cached — try a direct DB lookup as fallback
+        try:
+            info = self.db.get_camera_zone(camera_id)
+            if info:
+                info = {
+                    'zone_id': info['zone_id'],
+                    'zone_name': info['zone_name'],
+                    'is_restricted': bool(info['is_restricted']),
+                }
+                with self._zone_cache_lock:
+                    self._camera_zone_cache[camera_id] = info
+                return info
+        except Exception:
+            pass
+        return None
+
+    def _person_authorized_for_zone(self, employee_id: str, zone_name: str) -> bool:
+        if not employee_id or not zone_name:
+            return False
+        self._refresh_zone_caches()
+        with self._zone_cache_lock:
+            zones = self._person_zones_cache.get(employee_id)
+        if zones is not None:
+            return zone_name in zones
+        # Fallback direct lookup
+        try:
+            person = self.db.get_person_by_employee_id(employee_id)
+            if person:
+                authorized = person.get('authorized_zones') or []
+                return zone_name in authorized
+        except Exception:
+            pass
+        return False
+
+    def _check_zone_authorization(self, camera_id: str, face_results: List[Dict],
+                                  snapshot_b64: str = None):
+        """Emit 'unauthorized_zone' alarms when a person is seen in a restricted
+        zone without being listed in their authorized_zones."""
+        if not face_results:
+            return
+        zone_info = self._get_camera_zone_info(camera_id)
+        if not zone_info or not zone_info.get('is_restricted'):
+            return
+        zone_name = zone_info['zone_name']
+        for r in face_results:
+            name = r.get('name') or 'Unknown'
+            emp_id = r.get('employee_id')
+            confidence = r.get('confidence', 0) or 0
+            is_unknown = (name == 'Unknown') or not emp_id
+            if not is_unknown and self._person_authorized_for_zone(emp_id, zone_name):
+                # Recognized AND authorized — no alarm
+                continue
+            if is_unknown:
+                description = (
+                    f"Unknown person in restricted zone '{zone_name}' "
+                    f"({(confidence * 100):.0f}% confidence)"
+                )
+                subject = f"Unknown @ {zone_name}"
+            else:
+                description = (
+                    f"{name} ({emp_id}) in restricted zone '{zone_name}' "
+                    f"— not authorized ({(confidence * 100):.0f}% confidence)"
+                )
+                subject = f"{name} @ {zone_name}"
+
+            self._create_alarm_if_needed(
+                camera_id, 'unauthorized_zone', 'critical',
+                description, snapshot_b64,
+                {
+                    'zone_name': zone_name,
+                    'zone_id': zone_info.get('zone_id'),
+                    'person_name': name,
+                    'employee_id': emp_id,
+                    'confidence': confidence,
+                    'bbox': r.get('bbox'),
+                }
+            )
+            try:
+                self._log_detection_if_needed(
+                    camera_id, 'unauthorized_zone',
+                    subject=subject,
+                    confidence=confidence, severity='critical',
+                    status='unauthorized',
+                    details={
+                        'zone_name': zone_name,
+                        'person_name': name,
+                        'employee_id': emp_id,
+                    }
+                )
+            except Exception:
+                pass
 
     def _clear_all_queues(self):
         """Clear all queues when stopping camera"""

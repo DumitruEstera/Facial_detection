@@ -134,6 +134,31 @@ class DatabaseManager:
                 )
             """)
 
+            # Create zones table
+            self.cursor.execute("""
+                CREATE TABLE IF NOT EXISTS zones (
+                    id SERIAL PRIMARY KEY,
+                    name VARCHAR(100) UNIQUE NOT NULL,
+                    description TEXT,
+                    is_restricted BOOLEAN NOT NULL DEFAULT FALSE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            # Create cameras table (persistent camera registry)
+            self.cursor.execute("""
+                CREATE TABLE IF NOT EXISTS cameras (
+                    id SERIAL PRIMARY KEY,
+                    camera_id VARCHAR(50) UNIQUE NOT NULL,
+                    name VARCHAR(255),
+                    zone_id INTEGER REFERENCES zones(id) ON DELETE SET NULL,
+                    location VARCHAR(255),
+                    stream_url TEXT,
+                    camera_type VARCHAR(20) DEFAULT 'ip',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
             # Create detection logs table (historical record of every detection)
             self.cursor.execute("""
                 CREATE TABLE IF NOT EXISTS detection_logs (
@@ -160,6 +185,7 @@ class DatabaseManager:
             self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_alarms_type ON alarms(type)")
             self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_alarms_severity ON alarms(severity)")
             self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_alarms_created_at ON alarms(created_at)")
+            self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_cameras_zone ON cameras(zone_id)")
 
             self.conn.commit()
             print("Database tables created/verified")
@@ -1085,6 +1111,244 @@ class DatabaseManager:
                     'by_type': by_type, 'by_severity': by_severity}
         except Exception as e:
             print(f"Error getting detection log breakdown: {e}")
+            raise
+
+    # ── Zones management methods ────────────────────────────────
+
+    def create_zone(self, name: str, description: str = None,
+                    is_restricted: bool = False) -> int:
+        try:
+            self.cursor.execute(
+                """INSERT INTO zones (name, description, is_restricted)
+                   VALUES (%s, %s, %s) RETURNING id""",
+                (name, description, is_restricted)
+            )
+            self.conn.commit()
+            return self.cursor.fetchone()['id']
+        except psycopg2.IntegrityError:
+            self.conn.rollback()
+            raise ValueError(f"Zone '{name}' already exists")
+        except Exception as e:
+            self.conn.rollback()
+            print(f"Error creating zone: {e}")
+            raise
+
+    def list_zones(self) -> List[Dict]:
+        try:
+            self.cursor.execute("""
+                SELECT z.id, z.name, z.description, z.is_restricted, z.created_at,
+                       COALESCE(c.camera_count, 0) AS camera_count
+                FROM zones z
+                LEFT JOIN (
+                    SELECT zone_id, COUNT(*) AS camera_count
+                    FROM cameras WHERE zone_id IS NOT NULL
+                    GROUP BY zone_id
+                ) c ON c.zone_id = z.id
+                ORDER BY z.name
+            """)
+            return self.cursor.fetchall()
+        except Exception as e:
+            print(f"Error listing zones: {e}")
+            raise
+
+    def get_zone(self, zone_id: int) -> Optional[Dict]:
+        try:
+            self.cursor.execute("SELECT * FROM zones WHERE id = %s", (zone_id,))
+            return self.cursor.fetchone()
+        except Exception as e:
+            print(f"Error getting zone: {e}")
+            raise
+
+    def get_zone_by_name(self, name: str) -> Optional[Dict]:
+        try:
+            self.cursor.execute("SELECT * FROM zones WHERE name = %s", (name,))
+            return self.cursor.fetchone()
+        except Exception as e:
+            print(f"Error getting zone by name: {e}")
+            raise
+
+    def update_zone(self, zone_id: int, name: str = None,
+                    description: str = None, is_restricted: bool = None) -> bool:
+        try:
+            old = self.get_zone(zone_id)
+            if not old:
+                return False
+            updates = []
+            params = []
+            if name is not None and name != old['name']:
+                updates.append("name = %s")
+                params.append(name)
+            if description is not None:
+                updates.append("description = %s")
+                params.append(description)
+            if is_restricted is not None:
+                updates.append("is_restricted = %s")
+                params.append(is_restricted)
+            if not updates:
+                return False
+            params.append(zone_id)
+            self.cursor.execute(
+                f"UPDATE zones SET {', '.join(updates)} WHERE id = %s",
+                params
+            )
+            # If renamed, update persons.authorized_zones arrays to keep names in sync
+            if name is not None and name != old['name']:
+                self.cursor.execute(
+                    """UPDATE persons
+                       SET authorized_zones = array_replace(authorized_zones, %s, %s)
+                       WHERE %s = ANY(authorized_zones)""",
+                    (old['name'], name, old['name'])
+                )
+            self.conn.commit()
+            return True
+        except psycopg2.IntegrityError:
+            self.conn.rollback()
+            raise ValueError(f"Zone name '{name}' already exists")
+        except Exception as e:
+            self.conn.rollback()
+            print(f"Error updating zone: {e}")
+            raise
+
+    def delete_zone(self, zone_id: int) -> bool:
+        try:
+            zone = self.get_zone(zone_id)
+            if not zone:
+                return False
+            self.cursor.execute("DELETE FROM zones WHERE id = %s", (zone_id,))
+            # Remove zone name from any persons.authorized_zones arrays
+            self.cursor.execute(
+                """UPDATE persons
+                   SET authorized_zones = array_remove(authorized_zones, %s)
+                   WHERE %s = ANY(authorized_zones)""",
+                (zone['name'], zone['name'])
+            )
+            self.conn.commit()
+            return True
+        except Exception as e:
+            self.conn.rollback()
+            print(f"Error deleting zone: {e}")
+            raise
+
+    # ── Cameras registry methods ────────────────────────────────
+
+    def upsert_camera(self, camera_id: str, name: str = None,
+                      zone_id: int = None, location: str = None,
+                      stream_url: str = None, camera_type: str = 'ip') -> int:
+        """Insert or update a camera registry entry. Only updates non-None fields on conflict."""
+        try:
+            self.cursor.execute(
+                """INSERT INTO cameras (camera_id, name, zone_id, location, stream_url, camera_type)
+                   VALUES (%s, %s, %s, %s, %s, %s)
+                   ON CONFLICT (camera_id) DO UPDATE SET
+                     name = COALESCE(EXCLUDED.name, cameras.name),
+                     zone_id = COALESCE(EXCLUDED.zone_id, cameras.zone_id),
+                     location = COALESCE(EXCLUDED.location, cameras.location),
+                     stream_url = COALESCE(EXCLUDED.stream_url, cameras.stream_url),
+                     camera_type = COALESCE(EXCLUDED.camera_type, cameras.camera_type)
+                   RETURNING id""",
+                (camera_id, name, zone_id, location, stream_url, camera_type)
+            )
+            self.conn.commit()
+            return self.cursor.fetchone()['id']
+        except Exception as e:
+            self.conn.rollback()
+            print(f"Error upserting camera: {e}")
+            raise
+
+    def list_cameras_db(self) -> List[Dict]:
+        try:
+            self.cursor.execute("""
+                SELECT c.id, c.camera_id, c.name, c.zone_id, c.location,
+                       c.stream_url, c.camera_type, c.created_at,
+                       z.name AS zone_name, z.is_restricted AS zone_is_restricted
+                FROM cameras c
+                LEFT JOIN zones z ON z.id = c.zone_id
+                ORDER BY c.camera_id
+            """)
+            return self.cursor.fetchall()
+        except Exception as e:
+            print(f"Error listing cameras: {e}")
+            raise
+
+    def get_camera(self, camera_id: str) -> Optional[Dict]:
+        try:
+            self.cursor.execute("""
+                SELECT c.*, z.name AS zone_name, z.is_restricted AS zone_is_restricted
+                FROM cameras c
+                LEFT JOIN zones z ON z.id = c.zone_id
+                WHERE c.camera_id = %s
+            """, (camera_id,))
+            return self.cursor.fetchone()
+        except Exception as e:
+            print(f"Error getting camera: {e}")
+            raise
+
+    def update_camera(self, camera_id: str, name: str = None,
+                      zone_id=..., location: str = None,
+                      stream_url: str = None) -> bool:
+        """Update fields on a camera. Pass zone_id=None to clear."""
+        try:
+            updates = []
+            params = []
+            if name is not None:
+                updates.append("name = %s")
+                params.append(name)
+            if zone_id is not ...:
+                updates.append("zone_id = %s")
+                params.append(zone_id)
+            if location is not None:
+                updates.append("location = %s")
+                params.append(location)
+            if stream_url is not None:
+                updates.append("stream_url = %s")
+                params.append(stream_url)
+            if not updates:
+                return False
+            params.append(camera_id)
+            self.cursor.execute(
+                f"UPDATE cameras SET {', '.join(updates)} WHERE camera_id = %s",
+                params
+            )
+            self.conn.commit()
+            return self.cursor.rowcount > 0
+        except Exception as e:
+            self.conn.rollback()
+            print(f"Error updating camera: {e}")
+            raise
+
+    def delete_camera(self, camera_id: str) -> bool:
+        try:
+            self.cursor.execute("DELETE FROM cameras WHERE camera_id = %s", (camera_id,))
+            self.conn.commit()
+            return self.cursor.rowcount > 0
+        except Exception as e:
+            self.conn.rollback()
+            print(f"Error deleting camera: {e}")
+            raise
+
+    def get_camera_zone(self, camera_id: str) -> Optional[Dict]:
+        """Return {zone_id, zone_name, is_restricted} for a camera, or None if unassigned."""
+        try:
+            self.cursor.execute("""
+                SELECT z.id AS zone_id, z.name AS zone_name, z.is_restricted
+                FROM cameras c
+                JOIN zones z ON z.id = c.zone_id
+                WHERE c.camera_id = %s
+            """, (camera_id,))
+            return self.cursor.fetchone()
+        except Exception as e:
+            print(f"Error getting camera zone: {e}")
+            raise
+
+    def get_person_by_employee_id(self, employee_id: str) -> Optional[Dict]:
+        try:
+            self.cursor.execute(
+                "SELECT * FROM persons WHERE employee_id = %s",
+                (employee_id,)
+            )
+            return self.cursor.fetchone()
+        except Exception as e:
+            print(f"Error getting person by employee_id: {e}")
             raise
 
     # ── User management methods ──────────────────────────────────
