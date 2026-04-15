@@ -1530,19 +1530,26 @@ class EnhancedSecuritySystemAPI:
                     captured_any = False
                     
                     # ── Camera 1: Laptop webcam (CAM-01) ──────────────
-                    if self.is_streaming and self.video_capture and self.video_capture.isOpened():
-                        ret, frame = self.video_capture.read()
-                        if ret:
-                            captured_any = True
-                            self.stats['frames_captured'] += 1
-                            current_frame_id = self.frame_id
-                            self.frame_id += 1
-                            
-                            self.frame_counter += 1
-                            if self.frame_counter % self.frame_skip == 0:
-                                self._dispatch_frame(current_frame_id, "CAM-01", frame)
-                        else:
-                            pass  # failed read, will retry
+                    cap = self.video_capture
+                    if self.is_streaming and cap is not None:
+                        try:
+                            opened = cap.isOpened()
+                        except Exception:
+                            opened = False
+                        if opened:
+                            try:
+                                ret, frame = cap.read()
+                            except Exception:
+                                ret, frame = False, None
+                            if ret and frame is not None and getattr(frame, 'size', 0) > 0:
+                                captured_any = True
+                                self.stats['frames_captured'] += 1
+                                current_frame_id = self.frame_id
+                                self.frame_id += 1
+
+                                self.frame_counter += 1
+                                if self.frame_counter % self.frame_skip == 0:
+                                    self._dispatch_frame(current_frame_id, "CAM-01", frame)
                     
                     # ── IP Cameras (CAM-02, CAM-03, …) ────────────────
                     with self.cameras_lock:
@@ -1611,24 +1618,77 @@ class EnhancedSecuritySystemAPI:
                     
                     # Demographics for unknown faces
                     if self.demographics_enabled and face_results:
+                        now = time.time()
                         for result in face_results:
                             if result.get('name') == 'Unknown':
                                 self.stats['unknown_faces'] += 1
                                 bbox = result.get('bbox', result.get('bounding_box', None))
-                                if bbox:
-                                    x, y, w, h = bbox
-                                    face_crop = frame[max(0,y):y+h, max(0,x):x+w]
-                                    if face_crop.size > 0:
+                                if not bbox:
+                                    continue
+                                x, y, w, h = bbox
+                                face_crop = frame[max(0,y):y+h, max(0,x):x+w]
+                                if face_crop.size == 0:
+                                    continue
+
+                                cached, match_key = self._find_matching_unknown_face(bbox)
+
+                                with self.unknown_faces_lock:
+                                    if cached is None:
+                                        # New unknown face — enqueue for analysis
                                         self.demographics_request_id += 1
                                         req_id = self.demographics_request_id
                                         self.demographics_analyzer.request_analysis(face_crop, req_id)
-                                        
-                                        # Try to get cached demographics
                                         bbox_key = self._get_bbox_key(bbox)
-                                        cached, _ = self._find_matching_unknown_face(bbox)
-                                        if cached and cached.get('demographics'):
-                                            result.update(cached['demographics'])
+                                        self.unknown_faces_cache[bbox_key] = {
+                                            'request_id': req_id,
+                                            'bbox': bbox,
+                                            'last_seen': now,
+                                            'demographics': None,
+                                        }
+                                        entry = self.unknown_faces_cache[bbox_key]
+                                    else:
+                                        entry = cached
+                                        entry['last_seen'] = now
+                                        entry['bbox'] = bbox
+
+                                    # Poll worker for a finished result if we don't have one yet
+                                    if entry.get('demographics') is None and entry.get('request_id') is not None:
+                                        demo = self.demographics_analyzer.get_pending_result(entry['request_id'])
+                                        if demo:
+                                            entry['demographics'] = demo
                                             self.stats['demographics_analyzed'] += 1
+
+                                    if entry.get('demographics'):
+                                        result.update(entry['demographics'])
+
+                                # Draw demographics text above the bbox
+                                if result.get('age') or result.get('gender') or result.get('emotion'):
+                                    try:
+                                        age = result.get('age', '')
+                                        gender = result.get('gender', '')
+                                        emotion = result.get('emotion', '')
+                                        lines = []
+                                        if age != '' and age is not None:
+                                            lines.append(f"Age: {age}")
+                                        if gender:
+                                            lines.append(f"{gender}")
+                                        if emotion:
+                                            lines.append(f"{emotion}")
+                                        ty = max(0, y - 10)
+                                        for i, line in enumerate(lines):
+                                            cv2.putText(processed_frame, line,
+                                                        (x, ty - i * 18),
+                                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                                                        (0, 255, 255), 1, cv2.LINE_AA)
+                                    except Exception as e:
+                                        logger.debug(f"demographics draw failed: {e}")
+
+                        # Evict stale unknown-face cache entries (>30s unseen)
+                        with self.unknown_faces_lock:
+                            stale = [k for k, v in self.unknown_faces_cache.items()
+                                     if now - v.get('last_seen', 0) > 30.0]
+                            for k in stale:
+                                self.unknown_faces_cache.pop(k, None)
                     
                     processing_time = time.time() - start_time
                     
@@ -2370,7 +2430,7 @@ class EnhancedSecuritySystemAPI:
                 severity=severity,
                 description=description,
                 snapshot=snapshot_base64,
-                detection_metadata=detection_metadata
+                detection_metadata=convert_to_serializable(detection_metadata) if detection_metadata else None
             )
             logger.info(f"🚨 Alarm created: [{severity.upper()}] {alarm_type} on {camera_id} — {description}")
         except Exception as e:

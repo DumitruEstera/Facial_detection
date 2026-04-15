@@ -212,6 +212,14 @@ class FacialRecognitionSystem:
             else:
                 labels.append("Unknown")
                 confidences.append(0.0)
+                recognition_results.append({
+                    'name': 'Unknown',
+                    'confidence': 0.0,
+                    'person_id': None,
+                    'employee_id': None,
+                    'bbox': face_bbox,
+                    'timestamp': datetime.now(),
+                })
 
         annotated_frame = self.face_detector.draw_faces(frame, faces, labels, confidences)
         return annotated_frame, recognition_results

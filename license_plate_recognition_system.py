@@ -12,16 +12,24 @@ Works with EasyOCR (or switch to PaddleOCR for even better results)
 
 from __future__ import annotations
 
+import re
 import cv2
 import numpy as np
 import torch
 import easyocr
+from collections import Counter, deque
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 
 from ultralytics import YOLO
 from database_manager import DatabaseManager
+
+
+# Romanian plate formats:
+#   - County plates: 1-2 letters + 2-3 digits + 3 letters  (B123ABC, CJ12ABC)
+#   - Bucharest can have 3 digits (B123ABC)
+ROMANIAN_PLATE_RE = re.compile(r'^[A-Z]{1,2}\d{2,3}[A-Z]{3}$')
 
 
 # ============================================================================
@@ -81,18 +89,107 @@ def upscale_if_small(crop: np.ndarray,
 
 def preprocess_plate(img: np.ndarray) -> np.ndarray:
     """
-    Minimal preprocessing for OCR
-    Now with proper handling for upscaled images
+    Stronger preprocessing tuned for EasyOCR on license plates.
+
+    Pipeline:
+      1. Grayscale
+      2. Bilateral filter - denoise while preserving character edges
+      3. CLAHE - local contrast boost (handles shadows / uneven light)
+      4. Unsharp mask - sharpen characters after upscaling
+
+    Note: we deliberately do NOT binarize. EasyOCR's CRNN performs better
+    on continuous-tone grayscale than on thresholded images.
     """
-    # Convert to grayscale
     if len(img.shape) == 3:
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     else:
         gray = img.copy()
-    
-    # Note: No additional resizing here - already done by upscale_if_small
-    
+
+    gray = cv2.bilateralFilter(gray, 11, 17, 17)
+
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    gray = clahe.apply(gray)
+
+    blur = cv2.GaussianBlur(gray, (0, 0), sigmaX=1.0)
+    gray = cv2.addWeighted(gray, 1.5, blur, -0.5, 0)
+
     return gray
+
+
+# ============================================================================
+# PLATE TRACKER - temporal majority vote across frames
+# ============================================================================
+
+def _iou(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> float:
+    xa1, ya1, xa2, ya2 = a
+    xb1, yb1, xb2, yb2 = b
+    ix1, iy1 = max(xa1, xb1), max(ya1, yb1)
+    ix2, iy2 = min(xa2, xb2), min(ya2, yb2)
+    iw, ih = max(0, ix2 - ix1), max(0, iy2 - iy1)
+    inter = iw * ih
+    union = (xa2 - xa1) * (ya2 - ya1) + (xb2 - xb1) * (yb2 - yb1) - inter
+    return inter / union if union else 0.0
+
+
+class PlateTracker:
+    """
+    Tracks plate detections across frames by IoU and emits a stabilized
+    reading only after the same text wins a majority vote over several
+    frames. Filters non-Romanian-format readings out of the vote.
+    """
+
+    def __init__(self, iou_threshold: float = 0.3, max_age: int = 15,
+                 min_votes: int = 3, history: int = 10):
+        self.iou_threshold = iou_threshold
+        self.max_age = max_age
+        self.min_votes = min_votes
+        self.history = history
+        self.tracks: Dict[int, Dict] = {}
+        self._next_id = 0
+
+    def update(self, bbox: Tuple[int, int, int, int], text: str,
+               conf: float) -> Tuple[Optional[str], float]:
+        best_id, best_iou = None, self.iou_threshold
+        for tid, t in self.tracks.items():
+            i = _iou(bbox, t["bbox"])
+            if i > best_iou:
+                best_id, best_iou = tid, i
+
+        if best_id is None:
+            best_id = self._next_id
+            self._next_id += 1
+            self.tracks[best_id] = {
+                "bbox": bbox,
+                "readings": deque(maxlen=self.history),
+                "age": 0,
+                "emitted": None,
+                "emitted_conf": 0.0,
+            }
+
+        t = self.tracks[best_id]
+        t["bbox"] = bbox
+        t["age"] = 0
+
+        if text and conf >= 0.4 and ROMANIAN_PLATE_RE.match(text):
+            t["readings"].append((text, conf))
+
+        if len(t["readings"]) >= self.min_votes:
+            scores: Counter = Counter()
+            for txt, c in t["readings"]:
+                scores[txt] += c
+            best_text, total_conf = scores.most_common(1)[0]
+            votes = sum(1 for txt, _ in t["readings"] if txt == best_text)
+            if votes >= self.min_votes:
+                t["emitted"] = best_text
+                t["emitted_conf"] = total_conf / votes
+
+        return t["emitted"], t["emitted_conf"]
+
+    def age_tracks(self) -> None:
+        for tid in list(self.tracks):
+            self.tracks[tid]["age"] += 1
+            if self.tracks[tid]["age"] > self.max_age:
+                del self.tracks[tid]
 
 
 # ============================================================================
@@ -114,7 +211,9 @@ class LicensePlateRecognitionSystem:
                  plate_detector_weights: str | Path = "best.pt",
                  ocr_lang: List[str] = ['en'],
                  use_gpu: bool = True,
-                 target_plate_width: int = 250):
+                 target_plate_width: int = 250,
+                 min_votes: int = 3,
+                 tracker_max_age: int = 15):
         """
         Initialize with small plate fixes
         
@@ -157,8 +256,12 @@ class LicensePlateRecognitionSystem:
             verbose=False
         )
         
+        self.tracker = PlateTracker(min_votes=min_votes,
+                                    max_age=tracker_max_age)
+
         print("✅ System ready with SMALL PLATE FIX")
         print(f"   📏 Will upscale plates to {target_plate_width}+ pixels")
+        print(f"   🗳️  Temporal voting: need {min_votes} consistent reads")
 
     def process_frame(self, frame: np.ndarray) -> List[Dict]:
         """
@@ -192,71 +295,90 @@ class LicensePlateRecognitionSystem:
             # Preprocess
             pre = preprocess_plate(crop)
 
-            # OCR
-            text = ""
-            conf = 0.0
-            
-            try:
-                results = self.reader.readtext(pre)
-                
-                for (bbox, detected_text, confidence) in results:
-                    cleaned = detected_text.upper().replace(" ", "")
-                    cleaned = ''.join(c for c in cleaned if c.isalnum())
-                    text += cleaned
-                    conf = max(conf, confidence)
-                
-                # Fallback: try original crop if low confidence
-                if (not text or conf < 0.4):
-                    results_color = self.reader.readtext(crop)
-                    text_color = ""
-                    conf_color = 0.0
-                    
-                    for (bbox, detected_text, confidence) in results_color:
-                        cleaned = detected_text.upper().replace(" ", "")
-                        cleaned = ''.join(c for c in cleaned if c.isalnum())
-                        text_color += cleaned
-                        conf_color = max(conf_color, confidence)
-                    
-                    if conf_color > conf:
-                        text = text_color
-                        conf = conf_color
-                
-            except Exception as e:
-                print(f"OCR error: {e}")
-                text = ""
-                conf = 0.0
+            # OCR with allowlist + internal upscaling
+            raw_text, raw_conf = self._run_ocr(pre)
 
-            text = text.strip()
-            if text and conf > 0.4:
-                print(f"✅ Detected: {text} (conf: {conf:.2f})")
+            # Fallback on original color crop if low confidence
+            if not raw_text or raw_conf < 0.4:
+                alt_text, alt_conf = self._run_ocr(crop)
+                if alt_conf > raw_conf:
+                    raw_text, raw_conf = alt_text, alt_conf
 
-            # Lookup
+            # Push this per-frame reading through the tracker.
+            # The tracker filters by Romanian plate format and only emits
+            # a stable result after enough consistent votes.
+            stable_text, stable_conf = self.tracker.update(
+                (x1, y1, x2, y2), raw_text, raw_conf
+            )
+
+            # Lookup only once we have a stabilized reading
             owner = "Unknown car"
             authorised = False
-
-            if conf > 0.5 and text:
-                owner_name = self.db_manager.lookup_owner_by_plate(text)
+            if stable_text:
+                owner_name = self.db_manager.lookup_owner_by_plate(stable_text)
                 if owner_name:
                     owner = owner_name
                     authorised = True
+                print(f"✅ Stable plate: {stable_text} (conf: {stable_conf:.2f})")
 
-            # Result
-            ts = datetime.now()
-            plate_number = text if text else "UNKNOWN"
-            
+            plate_number = stable_text if stable_text else "UNKNOWN"
+
             outs.append({
-                "timestamp": ts,
+                "timestamp": datetime.now(),
                 "plate_number": plate_number,
                 "vehicle_type": None,
                 "is_authorized": authorised,
                 "bbox": (x1, y1, x2, y2),
                 "plate": plate_number,
-                "confidence": float(conf),
+                "confidence": float(stable_conf),
                 "owner": owner,
                 "authorised": authorised,
+                "raw_reading": raw_text,
+                "raw_confidence": float(raw_conf),
             })
 
+        # Age tracks so stale cars drop out
+        self.tracker.age_tracks()
         return outs
+
+    def _run_ocr(self, img: np.ndarray) -> Tuple[str, float]:
+        """Run EasyOCR with plate-specific constraints and L->R assembly."""
+        try:
+            results = self.reader.readtext(
+                img,
+                allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
+                detail=1,
+                paragraph=False,
+                text_threshold=0.6,
+                low_text=0.3,
+                mag_ratio=1.5,
+            )
+        except Exception as e:
+            print(f"OCR error: {e}")
+            return "", 0.0
+
+        if not results:
+            return "", 0.0
+
+        # Sort detections left-to-right by top-left x coordinate
+        results.sort(key=lambda r: r[0][0][0])
+
+        text_parts: List[str] = []
+        confs: List[float] = []
+        for (_bbox, detected_text, confidence) in results:
+            cleaned = ''.join(
+                c for c in detected_text.upper() if c.isalnum()
+            )
+            if cleaned:
+                text_parts.append(cleaned)
+                confs.append(confidence)
+
+        if not text_parts:
+            return "", 0.0
+
+        text = ''.join(text_parts)
+        conf = float(np.mean(confs))
+        return text, conf
     
     def register_plate(self, plate_number: str, vehicle_type: str = None,
                        owner_name: str = None, owner_id: str = None,
