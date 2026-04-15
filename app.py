@@ -1039,7 +1039,7 @@ class EnhancedSecuritySystemAPI:
                 raise HTTPException(status_code=500, detail=str(e))
         
         @self.app.get("/api/statistics")
-        async def get_statistics(current_user: dict = Depends(require_admin)):
+        async def get_statistics(current_user: dict = Depends(get_current_user)):
             try:
                 stats = self.db.get_statistics()
                 return convert_to_serializable(stats)
@@ -1156,6 +1156,28 @@ class EnhancedSecuritySystemAPI:
             """Detection log statistics for dashboard cards."""
             try:
                 return convert_to_serializable(self.db.get_detection_log_stats(hours=hours))
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.get("/api/logs/timeseries")
+        async def detection_log_timeseries(
+            hours: int = 24,
+            current_user: dict = Depends(get_current_user)
+        ):
+            """Time-bucketed detection counts for charting."""
+            try:
+                return convert_to_serializable(self.db.get_detection_log_timeseries(hours=hours))
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.get("/api/logs/breakdown")
+        async def detection_log_breakdown(
+            hours: int = 24,
+            current_user: dict = Depends(get_current_user)
+        ):
+            """Per-camera / per-type / per-severity breakdowns."""
+            try:
+                return convert_to_serializable(self.db.get_detection_log_breakdown(hours=hours))
             except Exception as e:
                 raise HTTPException(status_code=500, detail=str(e))
 

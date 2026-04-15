@@ -997,6 +997,96 @@ class DatabaseManager:
             print(f"Error getting detection log stats: {e}")
             raise
 
+    def get_detection_log_timeseries(self, hours: int = 24) -> Dict:
+        """Time-bucketed detection counts per type for charting.
+
+        Uses hourly buckets for hours <= 48, else daily buckets.
+        Returns empty buckets too so the chart has no gaps.
+        """
+        try:
+            bucket = 'hour' if hours <= 48 else 'day'
+            step = '1 hour' if bucket == 'hour' else '1 day'
+            self.cursor.execute(
+                f"""
+                WITH buckets AS (
+                    SELECT generate_series(
+                        date_trunc('{bucket}', NOW() - (%s || ' hours')::interval),
+                        date_trunc('{bucket}', NOW()),
+                        %s::interval
+                    ) AS ts
+                ),
+                counts AS (
+                    SELECT date_trunc('{bucket}', created_at) AS ts, type, COUNT(*) AS c
+                    FROM detection_logs
+                    WHERE created_at > NOW() - (%s || ' hours')::interval
+                    GROUP BY 1, 2
+                )
+                SELECT b.ts AS ts, c.type AS type, COALESCE(c.c, 0) AS count
+                FROM buckets b
+                LEFT JOIN counts c ON c.ts = b.ts
+                ORDER BY b.ts
+                """,
+                (str(hours), step, str(hours))
+            )
+            rows = self.cursor.fetchall()
+            buckets_set = {}
+            types = set()
+            for row in rows:
+                ts = row['ts'].isoformat() if row['ts'] else None
+                if ts is None:
+                    continue
+                if ts not in buckets_set:
+                    buckets_set[ts] = {}
+                if row['type']:
+                    buckets_set[ts][row['type']] = row['count']
+                    types.add(row['type'])
+            series = [
+                {'ts': ts, 'total': sum(counts.values()), 'by_type': counts}
+                for ts, counts in sorted(buckets_set.items())
+            ]
+            return {'bucket': bucket, 'hours': hours, 'series': series,
+                    'types': sorted(types)}
+        except Exception as e:
+            print(f"Error getting detection log timeseries: {e}")
+            raise
+
+    def get_detection_log_breakdown(self, hours: int = 24) -> Dict:
+        """Per-camera and per-type breakdowns over the last N hours."""
+        try:
+            self.cursor.execute(
+                "SELECT camera_id, COUNT(*) AS count FROM detection_logs "
+                "WHERE created_at > NOW() - (%s || ' hours')::interval "
+                "GROUP BY camera_id ORDER BY count DESC",
+                (str(hours),)
+            )
+            by_camera = [{'camera_id': r['camera_id'] or 'unknown', 'count': r['count']}
+                         for r in self.cursor.fetchall()]
+
+            self.cursor.execute(
+                "SELECT type, COUNT(*) AS count FROM detection_logs "
+                "WHERE created_at > NOW() - (%s || ' hours')::interval "
+                "GROUP BY type ORDER BY count DESC",
+                (str(hours),)
+            )
+            by_type = [{'type': r['type'], 'count': r['count']}
+                       for r in self.cursor.fetchall()]
+
+            self.cursor.execute(
+                "SELECT severity, COUNT(*) AS count FROM detection_logs "
+                "WHERE created_at > NOW() - (%s || ' hours')::interval "
+                "AND severity IS NOT NULL "
+                "GROUP BY severity ORDER BY count DESC",
+                (str(hours),)
+            )
+            by_severity = [{'severity': r['severity'], 'count': r['count']}
+                           for r in self.cursor.fetchall()]
+
+            return {'hours': hours, 'by_camera': by_camera,
+                    'by_type': by_type, 'by_severity': by_severity}
+        except Exception as e:
+            print(f"Error getting detection log breakdown: {e}")
+            raise
+
     # ── User management methods ──────────────────────────────────
 
     def _seed_default_admin(self):
