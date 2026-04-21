@@ -31,17 +31,18 @@ def check_dependencies():
         'numpy',
         'torch',
         'tensorflow',
-        'deepface',
         'fastapi',
         'uvicorn',
         'psycopg2',
-        'facenet_pytorch',
+        'insightface',
+        'onnxruntime',
+        'fer',
         'ultralytics',
         'easyocr'
     ]
-    
+
     missing_packages = []
-    
+
     for package in required_packages:
         try:
             __import__(package)
@@ -49,21 +50,27 @@ def check_dependencies():
         except ImportError:
             print(f"   ❌ {package} - NOT INSTALLED")
             missing_packages.append(package)
-    
+
     if missing_packages:
         print("\n⚠️  Missing packages detected!")
         print("Install them with:")
-        print(f"   pip install {' '.join(missing_packages)}")
+        pip_names = {'cv2': 'opencv-python', 'onnxruntime': 'onnxruntime-gpu'}
+        pip_pkgs = [pip_names.get(p, p) for p in missing_packages]
+        print(f"   pip install {' '.join(pip_pkgs)}")
         return False
-    
-    # Check DeepFace specifically
+
+    # Sanity-check that onnxruntime has the CUDA provider.
     try:
-        from deepface import DeepFace
-        print("   ✅ DeepFace - Demographics analysis available")
-    except ImportError:
-        print("   ⚠️  DeepFace not available - Demographics will be disabled")
-        print("      Install with: pip install deepface")
-    
+        import onnxruntime as ort
+        providers = ort.get_available_providers()
+        if 'CUDAExecutionProvider' in providers:
+            print("   ✅ onnxruntime CUDAExecutionProvider — InsightFace will run on GPU")
+        else:
+            print("   ⚠️  onnxruntime has no CUDAExecutionProvider — InsightFace will fall back to CPU")
+            print(f"      Available providers: {providers}")
+    except Exception as e:
+        print(f"   ⚠️  Could not probe onnxruntime providers: {e}")
+
     return True
 
 def check_database():

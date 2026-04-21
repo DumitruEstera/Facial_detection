@@ -11,84 +11,9 @@ from facial_recognition_system import FacialRecognitionSystem
 from license_plate_recognition_system import LicensePlateRecognitionSystem
 from fire_detection_system import FireDetectionSystem
 
-# Import DeepFace for demographics analysis
-try:
-    from deepface import DeepFace
-    DEEPFACE_AVAILABLE = True
-except ImportError:
-    DEEPFACE_AVAILABLE = False
-
-class FaceDemographicsAnalyzer:
-    """Class to handle face demographics analysis using DeepFace"""
-    
-    def __init__(self):
-        self.enabled = DEEPFACE_AVAILABLE
-        self.last_analysis_cache = {}
-        self.cache_duration = 3.0
-        self.debug_mode = False
-
-    def analyze_face(self, face_image: np.ndarray, face_bbox: tuple) -> dict:
-        """Analyze face for emotion, age, and gender"""
-        try:
-            x, y, w, h = face_bbox
-            cache_key = f"{x}_{y}_{w}_{h}"
-            current_time = time.time()
-            
-            if cache_key in self.last_analysis_cache:
-                last_time, last_result = self.last_analysis_cache[cache_key]
-                if current_time - last_time < self.cache_duration:
-                    return last_result
-            
-            if len(face_image.shape) == 3 and face_image.shape[2] == 3:
-                face_rgb = cv2.cvtColor(face_image, cv2.COLOR_BGR2RGB)
-            else:
-                face_rgb = face_image
-                
-            height, width = face_rgb.shape[:2]
-            if width < 48 or height < 48:
-                scale = max(48/width, 48/height)
-                new_width = int(width * scale)
-                new_height = int(height * scale)
-                face_rgb = cv2.resize(face_rgb, (new_width, new_height))
-
-            analysis = DeepFace.analyze(
-                img_path=face_rgb,
-                actions=['age', 'gender', 'emotion'],
-                enforce_detection=False,
-                silent=True
-            )
-            
-            if isinstance(analysis, list) and len(analysis) > 0:
-                result = analysis[0]
-            else:
-                result = analysis
-                
-            demographics = {
-                'age': int(result.get('age', 0)),
-                'gender': result.get('dominant_gender', 'unknown'),
-                'emotion': result.get('dominant_emotion', 'unknown'),
-                'gender_confidence': result.get('gender', {}).get(result.get('dominant_gender', ''), 0),
-                'emotion_confidence': result.get('emotion', {}).get(result.get('dominant_emotion', ''), 0)
-            }
-
-            self.last_analysis_cache[cache_key] = (current_time, demographics)
-            self._clean_cache(current_time)
-            
-            return demographics
-            
-        except Exception as e:
-            print(f"❌ Error in face demographics analysis: {e}")
-            return {}
-    
-    def _clean_cache(self, current_time):
-        """Remove old cache entries"""
-        keys_to_remove = []
-        for key, (timestamp, _) in self.last_analysis_cache.items():
-            if current_time - timestamp > self.cache_duration * 2:
-                keys_to_remove.append(key)
-        
-        for key in keys_to_remove:
-            del self.last_analysis_cache[key]
+# Demographics (age/gender/emotion) are returned inline by
+# FacialRecognitionSystem.process_frame via InsightFace + FER — no separate
+# DeepFace analyzer is required here.
 
 class IntegratedSecurityGUI:
     def __init__(self, root, db_config):
@@ -99,7 +24,6 @@ class IntegratedSecurityGUI:
         # Initialize systems
         self.face_system = FacialRecognitionSystem(db_config, camera_id="0")
         self.plate_system = LicensePlateRecognitionSystem(db_config)
-        self.demographics_analyzer = FaceDemographicsAnalyzer()
         
         # Initialize fire detection system
         try:
@@ -412,58 +336,14 @@ class IntegratedSecurityGUI:
                         # Process based on mode
                         if mode in ['face', 'all']:
                             face_frame, face_results = self.face_system.process_frame(frame)
-                            
-                            # Analyze demographics for unknown faces
-                            if self.analyze_demographics.get():
-                                try:
-                                    # Get ALL detected faces
-                                    all_faces = self.face_system.face_detector.detect_faces(frame)
-                                    
-                                    # Get bounding boxes of recognized faces
-                                    recognized_bboxes = [result['bbox'] for result in face_results]
-                                    
-                                    # Find unknown faces (faces not in recognized list)
-                                    for face_bbox in all_faces:
-                                        # Check if this face is already recognized
-                                        is_recognized = False
-                                        for recognized_bbox in recognized_bboxes:
-                                            # Compare bounding boxes (same face if overlaps significantly)
-                                            if self._bboxes_overlap(face_bbox, recognized_bbox):
-                                                is_recognized = True
-                                                break
-                                        
-                                        # If face is unknown, analyze demographics
-                                        if not is_recognized:
-                                            x, y, w, h = face_bbox
-                                            face_region = frame[y:y+h, x:x+w]
-                                            
-                                            # Analyze demographics
-                                            demographics = self.demographics_analyzer.analyze_face(face_region, face_bbox)
-                                            
-                                            # Add unknown face with demographics to results
-                                            unknown_result = {
-                                                'name': 'Unknown',
-                                                'employee_id': '',
-                                                'department': '',
-                                                'confidence': 0.0,
-                                                'bbox': face_bbox,
-                                                'timestamp': datetime.now(),
-                                                'age': demographics.get('age', '') if demographics else '',
-                                                'gender': demographics.get('gender', '') if demographics else '',
-                                                'emotion': demographics.get('emotion', '') if demographics else ''
-                                            }
-                                            face_results.append(unknown_result)
-                                
-                                except Exception as e:
-                                    print(f"❌ Error analyzing demographics for unknown faces: {e}")
-                            
+                            # age/gender/emotion are already populated on every
+                            # face_results entry by InsightFace + FER.
+
                             if mode == 'face':
                                 annotated_frame = face_frame
-                                # Draw demographics on the frame
                                 annotated_frame = self._draw_demographics_on_frame(annotated_frame, face_results)
                             elif mode == 'all':
-                                # Draw demographics on the combined frame
-                                annotated_frame = self._draw_demographics_on_frame(annotated_frame, face_results)                                               
+                                annotated_frame = self._draw_demographics_on_frame(annotated_frame, face_results)
                                 
                         if mode in ['plate', 'all']:
                             plate_results = self.plate_system.process_frame(frame)

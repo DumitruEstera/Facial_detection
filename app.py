@@ -5,7 +5,7 @@ and Human Action Recognition (HAR).
 
 Key features:
 1. Multi-threaded processing pipeline (7 threads)
-2. Demographic analysis for unknown faces using DeepFace
+2. Demographic analysis (age/gender/emotion) via InsightFace + FER
 3. Human Action Recognition using SlowFast R50
 4. GPU-accelerated processing
 5. Improved queue management and result merging
@@ -35,7 +35,6 @@ import logging
 from facial_recognition_system import FacialRecognitionSystem
 from license_plate_recognition_system import LicensePlateRecognitionSystem
 from database_manager import DatabaseManager
-from face_detection import YuNetFaceDetector
 from fire_detection_system import FireDetectionSystem
 from har_system import HumanActionRecognitionSystem
 from weapon_detection_system import WeaponDetectionSystem
@@ -44,14 +43,9 @@ from weapon_detection_system import WeaponDetectionSystem
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Import DeepFace for demographics analysis
-try:
-    from deepface import DeepFace
-    DEEPFACE_AVAILABLE = True
-    logger.info("✅ DeepFace available for demographic analysis")
-except ImportError:
-    DEEPFACE_AVAILABLE = False
-    logger.warning("⚠️ DeepFace not available - demographic analysis disabled")
+# Demographic analysis (age/gender/emotion) is produced inline by
+# FacialRecognitionSystem.process_frame via InsightFace + FER. No separate
+# DeepFace pipeline is required.
 
 # Pydantic models
 class LoginRequest(BaseModel):
@@ -172,130 +166,6 @@ DB_CONFIG = {
 }
 
 
-class FaceDemographicsAnalyzer:
-    """
-    Class to handle face demographics analysis using DeepFace
-    GPU-accelerated when available
-    """
-    
-    def __init__(self):
-        self.enabled = DEEPFACE_AVAILABLE
-        self.last_analysis_cache = {}
-        self.cache_duration = 3.0  # Cache results for 3 seconds
-        self.analysis_queue = queue.Queue(maxsize=20)
-        self.results_queue = queue.Queue(maxsize=20)
-        self.pending_demographics = {}  # Store demographics results until they're used
-        self.pending_lock = threading.Lock()  # Thread-safe access to pending results
-        self.is_running = False
-        
-        if self.enabled:
-            # Start analysis thread
-            self.is_running = True
-            self.analysis_thread = threading.Thread(
-                target=self._analysis_worker,
-                daemon=True,
-                name="DemographicsThread"
-            )
-            self.analysis_thread.start()
-            logger.info("✅ Demographics analysis thread started")
-    
-    def _analysis_worker(self):
-        """Background thread for demographics analysis"""
-        while self.is_running:
-            try:
-                request = self.analysis_queue.get(timeout=1.0)
-                request_id = request['request_id']
-                face_image = request['face_image']
-                
-                demographics = self._analyze_face(face_image)
-                
-                if demographics:
-                    with self.pending_lock:
-                        self.pending_demographics[request_id] = demographics
-                        
-            except queue.Empty:
-                continue
-            except Exception as e:
-                logger.error(f"❌ Error in demographics worker: {e}")
-    
-    def request_analysis(self, face_image: np.ndarray, request_id: int):
-        """Queue a face image for demographics analysis"""
-        if not self.enabled:
-            return
-        
-        try:
-            self.analysis_queue.put({
-                'request_id': request_id,
-                'face_image': face_image.copy()
-            }, block=False)
-        except queue.Full:
-            pass
-    
-    def get_pending_result(self, request_id: int) -> Optional[Dict]:
-        """Get demographics result for a request_id if available"""
-        with self.pending_lock:
-            return self.pending_demographics.pop(request_id, None)
-    
-    def _analyze_face(self, face_image: np.ndarray) -> Dict:
-        """Analyze a face image for demographics"""
-        try:
-            if face_image is None or face_image.size == 0:
-                return {}
-            
-            # Check cache
-            cache_key = hash(face_image.tobytes()[:1000])
-            current_time = time.time()
-            
-            if cache_key in self.last_analysis_cache:
-                cached_time, cached_result = self.last_analysis_cache[cache_key]
-                if current_time - cached_time < self.cache_duration:
-                    return cached_result
-            
-            # Run DeepFace analysis
-            result = DeepFace.analyze(
-                face_image,
-                actions=['age', 'gender', 'emotion'],
-                enforce_detection=False,
-                silent=True
-            )
-            
-            if isinstance(result, list):
-                result = result[0]
-            
-            demographics = {
-                'age': result.get('age', 'unknown'),
-                'gender': result.get('dominant_gender', 'unknown'),
-                'emotion': result.get('dominant_emotion', 'unknown'),
-                'gender_confidence': result.get('gender', {}).get(result.get('dominant_gender', ''), 0),
-                'emotion_confidence': result.get('emotion', {}).get(result.get('dominant_emotion', ''), 0)
-            }
-
-            self.last_analysis_cache[cache_key] = (current_time, demographics)
-            self._clean_cache(current_time)
-            
-            return demographics
-            
-        except Exception as e:
-            logger.error(f"❌ Error in face demographics analysis: {e}")
-            return {}
-    
-    def _clean_cache(self, current_time):
-        """Remove old cache entries"""
-        keys_to_remove = []
-        for key, (timestamp, _) in self.last_analysis_cache.items():
-            if current_time - timestamp > self.cache_duration * 2:
-                keys_to_remove.append(key)
-        
-        for key in keys_to_remove:
-            del self.last_analysis_cache[key]
-    
-    def stop(self):
-        """Stop analysis thread"""
-        self.is_running = False
-        if hasattr(self, 'analysis_thread'):
-            self.analysis_thread.join(timeout=2.0)
-
-
 def convert_to_serializable(obj):
     """Convert numpy types to Python native types"""
     if isinstance(obj, dict):
@@ -379,13 +249,10 @@ class EnhancedSecuritySystemAPI:
             self.weapon_system = None
             self.weapon_detection_enabled = False
 
-        # Initialize demographics analyzer
-        self.demographics_analyzer = FaceDemographicsAnalyzer()
+        # Demographics (age/gender/emotion) are produced by
+        # FacialRecognitionSystem.process_frame; no separate analyzer is needed.
         self.demographics_enabled = True
-        
-        # Initialize face detector for finding all faces
-        self.face_detector = YuNetFaceDetector()
-        
+
          # Video streaming - Multi-camera support
         self.video_capture = None          # kept for backward compatibility (CAM-01 / laptop)
         self.is_streaming = False
@@ -506,7 +373,7 @@ class EnhancedSecuritySystemAPI:
                 "features": {
                     "face_recognition": True,
                     "license_plate_recognition": True,
-                    "demographics_analysis": DEEPFACE_AVAILABLE,
+                    "demographics_analysis": True,
                     "fire_detection": self.fire_system is not None,
                     "human_action_recognition": self.har_system is not None,
                     "weapon_detection": self.weapon_system is not None
@@ -915,21 +782,9 @@ class EnhancedSecuritySystemAPI:
                             errors.append(f"{file.filename}: Could not decode image")
                             continue
 
-                        # Detect faces in the image
-                        faces = self.face_system.face_detector.detect_faces(img)
-                        if len(faces) != 1:
-                            errors.append(f"{file.filename}: Expected 1 face, found {len(faces)}")
-                            continue
-
-                        # Extract and store embedding
-                        face_img = self.face_system.face_detector.extract_face(img, faces[0])
-                        if face_img is None:
-                            errors.append(f"{file.filename}: Could not extract face")
-                            continue
-
-                        embedding = self.face_system.feature_extractor.extract_embedding(face_img)
+                        embedding = self.face_system.extract_embedding_from_image(img)
                         if embedding is None:
-                            errors.append(f"{file.filename}: Could not generate embedding")
+                            errors.append(f"{file.filename}: Expected exactly 1 face in image")
                             continue
 
                         self.db.add_face_embedding(person_id, embedding)
@@ -1604,91 +1459,48 @@ class EnhancedSecuritySystemAPI:
         
         # ── Thread 2: Facial Recognition + Demographics ───────────────
         def face_processing_thread():
-            """Process frames for facial recognition and demographics"""
+            """Process frames for facial recognition. InsightFace + FER return
+            age/gender/emotion inline with recognition results."""
             logger.info("👤 Thread 2: Face Recognition + Demographics started")
-            
+
             while True:
                 try:
                     frame_id, camera_id, frame = self.face_processing_queue.get(timeout=1.0)
-                    
+
                     start_time = time.time()
-                    
-                    # Process faces
+
                     processed_frame, face_results = self._process_faces(frame)
-                    
-                    # Demographics for unknown faces
+
                     if self.demographics_enabled and face_results:
-                        now = time.time()
                         for result in face_results:
                             if result.get('name') == 'Unknown':
                                 self.stats['unknown_faces'] += 1
-                                bbox = result.get('bbox', result.get('bounding_box', None))
+
+                            if result.get('age') is not None or result.get('gender') or result.get('emotion'):
+                                self.stats['demographics_analyzed'] += 1
+                                bbox = result.get('bbox')
                                 if not bbox:
                                     continue
                                 x, y, w, h = bbox
-                                face_crop = frame[max(0,y):y+h, max(0,x):x+w]
-                                if face_crop.size == 0:
-                                    continue
-
-                                cached, match_key = self._find_matching_unknown_face(bbox)
-
-                                with self.unknown_faces_lock:
-                                    if cached is None:
-                                        # New unknown face — enqueue for analysis
-                                        self.demographics_request_id += 1
-                                        req_id = self.demographics_request_id
-                                        self.demographics_analyzer.request_analysis(face_crop, req_id)
-                                        bbox_key = self._get_bbox_key(bbox)
-                                        self.unknown_faces_cache[bbox_key] = {
-                                            'request_id': req_id,
-                                            'bbox': bbox,
-                                            'last_seen': now,
-                                            'demographics': None,
-                                        }
-                                        entry = self.unknown_faces_cache[bbox_key]
-                                    else:
-                                        entry = cached
-                                        entry['last_seen'] = now
-                                        entry['bbox'] = bbox
-
-                                    # Poll worker for a finished result if we don't have one yet
-                                    if entry.get('demographics') is None and entry.get('request_id') is not None:
-                                        demo = self.demographics_analyzer.get_pending_result(entry['request_id'])
-                                        if demo:
-                                            entry['demographics'] = demo
-                                            self.stats['demographics_analyzed'] += 1
-
-                                    if entry.get('demographics'):
-                                        result.update(entry['demographics'])
-
-                                # Draw demographics text above the bbox
-                                if result.get('age') or result.get('gender') or result.get('emotion'):
-                                    try:
-                                        age = result.get('age', '')
-                                        gender = result.get('gender', '')
-                                        emotion = result.get('emotion', '')
-                                        lines = []
-                                        if age != '' and age is not None:
-                                            lines.append(f"Age: {age}")
-                                        if gender:
-                                            lines.append(f"{gender}")
-                                        if emotion:
-                                            lines.append(f"{emotion}")
-                                        ty = max(0, y - 10)
-                                        for i, line in enumerate(lines):
-                                            cv2.putText(processed_frame, line,
-                                                        (x, ty - i * 18),
-                                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                                                        (0, 255, 255), 1, cv2.LINE_AA)
-                                    except Exception as e:
-                                        logger.debug(f"demographics draw failed: {e}")
-
-                        # Evict stale unknown-face cache entries (>30s unseen)
-                        with self.unknown_faces_lock:
-                            stale = [k for k, v in self.unknown_faces_cache.items()
-                                     if now - v.get('last_seen', 0) > 30.0]
-                            for k in stale:
-                                self.unknown_faces_cache.pop(k, None)
+                                try:
+                                    age = result.get('age')
+                                    gender = result.get('gender')
+                                    emotion = result.get('emotion')
+                                    lines = []
+                                    if age is not None:
+                                        lines.append(f"Age: {age}")
+                                    if gender:
+                                        lines.append(f"{gender}")
+                                    if emotion:
+                                        lines.append(f"{emotion}")
+                                    ty = max(0, y - 10)
+                                    for i, line in enumerate(lines):
+                                        cv2.putText(processed_frame, line,
+                                                    (x, ty - i * 18),
+                                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                                                    (0, 255, 255), 1, cv2.LINE_AA)
+                                except Exception as e:
+                                    logger.debug(f"demographics draw failed: {e}")
                     
                     processing_time = time.time() - start_time
                     
@@ -2594,8 +2406,7 @@ class EnhancedSecuritySystemAPI:
     
     def __del__(self):
         """Cleanup on destruction"""
-        if hasattr(self, 'demographics_analyzer'):
-            self.demographics_analyzer.stop()
+        pass
 
 
 # Create the API instance
@@ -2608,21 +2419,15 @@ if __name__ == "__main__":
     logger.info("📡 API: http://localhost:8000")
     logger.info("🔌 WebSocket: ws://localhost:8000/ws")
     logger.info("📚 Docs: http://localhost:8000/docs")
-    logger.info("🧵 Multi-threaded processing: 8 threads")
+    logger.info("🧵 Multi-threaded processing: 7 threads")
     logger.info("   - Thread 1: Video Capture")
-    logger.info("   - Thread 2: Facial Recognition + Demographics")
+    logger.info("   - Thread 2: Facial Recognition + Demographics (InsightFace + FER)")
     logger.info("   - Thread 3: License Plate Recognition")
     logger.info("   - Thread 4: Fire & Smoke Detection")
     logger.info("   - Thread 5: Human Action Recognition (SlowFast)")
     logger.info("   - Thread 6: Weapon Detection")
     logger.info("   - Thread 7: Results Merging")
-    logger.info("   - Thread 8: Demographics Analysis (DeepFace)")
-    
-    if DEEPFACE_AVAILABLE:
-        logger.info("✅ DeepFace enabled - demographics analysis available")
-    else:
-        logger.info("⚠️ DeepFace not available - install with: pip install deepface")
-    
+
     try:
         uvicorn.run(
             "app:app",

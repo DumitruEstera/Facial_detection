@@ -1,8 +1,19 @@
 import torch
 import numpy as np
 import cv2
+import warnings
 from typing import List, Optional
 from facenet_pytorch import InceptionResnetV1
+
+warnings.warn(
+    "feature_extraction.FaceNetFeatureExtractor is DEPRECATED. Face embeddings "
+    "are now produced by InsightFace (512-d `normed_embedding`) inside "
+    "FacialRecognitionSystem. Any FaceNet embeddings stored in the database "
+    "are INCOMPATIBLE with the new pipeline — wipe the face_embeddings table "
+    "and re-register users. This module will be removed in a future release.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 
 class FaceNetFeatureExtractor:

@@ -3,6 +3,16 @@ import numpy as np
 from typing import List, Tuple, Optional
 import urllib.request
 import os
+import warnings
+
+warnings.warn(
+    "face_detection.YuNetFaceDetector is DEPRECATED. Face detection is now "
+    "handled by InsightFace inside FacialRecognitionSystem. This module will "
+    "be removed in a future release.",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
 
 class YuNetFaceDetector:
     def __init__(self, model_path: str = None, conf_threshold: float = 0.7, 

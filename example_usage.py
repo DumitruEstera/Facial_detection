@@ -17,9 +17,9 @@ from facial_recognition_system import FacialRecognitionSystem
 # Database configuration
 DB_CONFIG = {
     'host': 'localhost',
-    'database': 'facial_recognition_db',
+    'database': 'facial_recognition',
     'user': 'postgres',
-    'password': 'admin'  # Change this to your PostgreSQL password
+    'password': 'incorect'
 }
 
 DEFAULT_NUM_FACES = 20

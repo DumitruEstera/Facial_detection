@@ -8,13 +8,18 @@ import json
 from datetime import datetime
 
 class DatabaseManager:
-    def __init__(self, host='localhost', database='facial_recognition', 
+    def __init__(self, host='localhost', database='facial_recognition',
                  user='postgres', password='incorect'):
         self.connection_params = {
             'host': host,
             'database': database,
             'user': user,
-            'password': password
+            'password': password,
+            # Disable libpq TLS for localhost. Postgres 17 negotiates TLS 1.3 by
+            # default; psycopg2-binary's bundled libpq/OpenSSL collides with the
+            # OpenSSL that torch/tensorflow/faiss have already loaded in-process
+            # and segfaults during connect. Local sockets don't need TLS.
+            'sslmode': 'disable',
         }
         self.conn = None
         self.cursor = None
