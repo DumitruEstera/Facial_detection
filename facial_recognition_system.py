@@ -1,10 +1,9 @@
 import os
 
-# Keep TensorFlow (pulled in by FER) off the GPU. FER's emotion CNN is small
-# and runs fine on CPU; leaving TF on GPU causes CUDA-context conflicts with
+# Keep TensorFlow off the GPU. The emotion CNN (Mini-Xception) is small and
+# runs fine on CPU; leaving TF on GPU causes CUDA-context conflicts with
 # onnxruntime-gpu (used by InsightFace) and segfaults at init time.
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
-os.environ.setdefault("CUDA_VISIBLE_DEVICES_FER", os.environ.get("CUDA_VISIBLE_DEVICES", ""))
 os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
 
 
@@ -79,15 +78,16 @@ from datetime import datetime
 import queue
 import logging
 
-# Disable TF GPU visibility *before* FER imports TF.
+# Disable TF GPU visibility *before* the emotion model loads.
+import tensorflow as _tf
 try:
-    import tensorflow as _tf
     _tf.config.set_visible_devices([], "GPU")
 except Exception:
     pass
 
+from importlib.resources import files as _pkg_files
+
 from insightface.app import FaceAnalysis
-from fer import FER
 
 from database_manager import DatabaseManager
 from faiss_index import FaissIndex
@@ -115,14 +115,19 @@ _DB_WIPE_WARNING = (
 class FacialRecognitionSystem:
     """
     Consolidated facial-recognition pipeline backed by InsightFace (detection +
-    bounding boxes + landmarks + 512-d embeddings + age + gender) and FER
-    (emotion classification via Haar-cascade localisation on CPU).
+    bounding boxes + landmarks + 512-d embeddings + age + gender) and a
+    Mini-Xception CNN for emotion classification, run directly on the
+    InsightFace bbox crop (no secondary Haar-cascade detection pass).
     """
 
     # InsightFace buffalo_s produces L2-normalised 512-d embeddings (w600k_mbf,
     # MobileFaceNet). With normalised vectors, L2² = 2 - 2·cos_sim; see
     # `recognition_threshold` in __init__ for the chosen operating point.
     EMBEDDING_DIM = 512
+
+    # FER-2013 class ordering — matches the softmax outputs of the emotion
+    # model shipped in the `fer` package (emotion_model.hdf5).
+    _EMOTION_LABELS = ("angry", "disgust", "fear", "happy", "sad", "surprise", "neutral")
 
     def __init__(self, db_config: Dict, camera_id: str = "0"):
         self.camera_id = camera_id
@@ -154,8 +159,17 @@ class FacialRecognitionSystem:
         )
         self.face_app.prepare(ctx_id=0, det_size=(640, 640))
 
-        print("Initializing FER emotion detector (Haar cascade)...")
-        self.emotion_detector = FER(mtcnn=False)
+        print("Loading emotion CNN (Mini-Xception) on CPU...")
+        # We reuse the .hdf5 weights bundled with the `fer` package but skip
+        # its API entirely: no Haar cascade, no redundant face detection. The
+        # model is fed the tight InsightFace bbox crop directly.
+        emotion_model_path = str(_pkg_files("fer") / "data" / "emotion_model.hdf5")
+        self._emotion_classifier = _tf.keras.models.load_model(
+            emotion_model_path, compile=False
+        )
+        # input_shape is (None, H, W, 1); cv2.resize expects (W, H).
+        _, _emo_h, _emo_w, _ = self._emotion_classifier.input_shape
+        self._emotion_target_size = (_emo_w, _emo_h)
 
         print("Initializing Faiss index...")
         self.faiss_index = FaissIndex(dimension=self.EMBEDDING_DIM)
@@ -241,19 +255,25 @@ class FacialRecognitionSystem:
         return faces[0]
 
     def _classify_emotion(self, face_crop: np.ndarray) -> Tuple[Optional[str], Optional[float]]:
-        """Run FER on a cropped face; returns (emotion, score) or (None, None)."""
+        """
+        Run the Mini-Xception emotion CNN on a tightly-cropped face (BGR).
+        Returns (emotion, score) or (None, None). Preprocessing mirrors
+        FER's internal pipeline: BGR→gray → resize to model input → scale
+        to [-1, 1] → (1, H, W, 1) tensor.
+        """
         if face_crop is None or face_crop.size == 0:
             return None, None
         try:
-            top = self.emotion_detector.top_emotion(face_crop)
-            if top is None:
-                return None, None
-            emotion, score = top
-            if emotion is None:
-                return None, None
-            return emotion, float(score) if score is not None else None
+            gray = cv2.cvtColor(face_crop, cv2.COLOR_BGR2GRAY)
+            gray = cv2.resize(gray, self._emotion_target_size)
+            x = gray.astype("float32") / 255.0
+            x = (x - 0.5) * 2.0
+            x = np.expand_dims(x, axis=(0, -1))
+            probs = self._emotion_classifier(x, training=False).numpy()[0]
+            idx = int(np.argmax(probs))
+            return self._EMOTION_LABELS[idx], float(probs[idx])
         except Exception as e:
-            logger.debug(f"FER emotion classification failed: {e}")
+            logger.debug(f"Emotion classification failed: {e}")
             return None, None
 
     # --------------------------------------------------------------------- #
@@ -393,8 +413,9 @@ class FacialRecognitionSystem:
     def process_frame(self, frame: np.ndarray) -> Tuple[np.ndarray, List[Dict]]:
         """
         One InsightFace pass per frame → bbox + landmarks + embedding + age +
-        gender. Emotion is classified on the cropped face by FER. Returns the
-        annotated frame and a list of per-face result dicts.
+        gender. Emotion is classified by feeding the same InsightFace bbox
+        crop directly into the Mini-Xception CNN. Returns the annotated frame
+        and a list of per-face result dicts.
         """
         faces = self.face_app.get(frame)
         recognition_results: List[Dict] = []
@@ -411,8 +432,8 @@ class FacialRecognitionSystem:
             is_known = bool(match and match["confidence"] >= self.min_confidence)
 
             # Demographics (age/gender/emotion) only for unknown faces — known
-            # persons already have identity info, and FER in particular is
-            # non-trivial CPU work we'd rather not repeat every frame.
+            # persons already have identity info, so there's no reason to run
+            # the extra emotion CNN pass on them every frame.
             if is_known:
                 age, gender, emotion, emotion_conf = None, None, None, None
             else:
@@ -421,16 +442,7 @@ class FacialRecognitionSystem:
                 gender_raw = getattr(face, "gender", None)
                 gender = "Man" if gender_raw == 1 else ("Woman" if gender_raw == 0 else None)
 
-                # FER's Haar cascade needs ~30% margin around the face to
-                # relocate it; pass it a padded crop instead of the tight
-                # InsightFace bbox.
-                pad_x, pad_y = int(0.3 * w), int(0.3 * h)
-                H, W = frame.shape[:2]
-                fx1 = max(0, x - pad_x)
-                fy1 = max(0, y - pad_y)
-                fx2 = min(W, x + w + pad_x)
-                fy2 = min(H, y + h + pad_y)
-                emotion, emotion_conf = self._classify_emotion(frame[fy1:fy2, fx1:fx2])
+                emotion, emotion_conf = self._classify_emotion(frame[y:y + h, x:x + w])
 
             if is_known:
                 result = {

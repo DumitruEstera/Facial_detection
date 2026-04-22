@@ -113,3 +113,14 @@ export QT_QPA_PLATFORM=xcb
 python example_usage.py --mode register --name "..." --employee-id "..." --images-dir ./face_dir
 python app.py
 ```
+Changes 2026-04-21
+Summary of changes to facial_recognition_system.py:                                                                                                   
+                                                                                                                                                      
+  - Removed from fer import FER and the FER(mtcnn=False) initialisation.                                                                                
+  - Added direct Mini-Xception load via tf.keras.models.load_model(...). The .hdf5 weights still come from the installed fer package                    
+  (importlib.resources), so no file needs to be vendored into the repo.                                                                                 
+  - Rewrote _classify_emotion to do the preprocessing inline: BGR→gray → resize to (W, H) from model.input_shape → scale to [-1, 1] (FER's v2           
+  preprocessing) → (1, H, W, 1) tensor → argmax over the 7 FER-2013 labels. No Haar cascade, no second face-detection pass.                             
+  - Removed the 30% padding in process_frame (facial_recognition_system.py:418) — the Mini-Xception CNN is now fed the tight InsightFace bbox directly. 
+  If accuracy looks weak on certain angles, add a small ~10% pad back in; Haar's 30% is no longer warranted.                                            
+  - Updated the TF-on-CPU comment block, class docstring, and process_frame docstring to reflect the new pipeline.           
