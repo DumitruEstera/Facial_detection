@@ -122,14 +122,19 @@ function App() {
             });
           }
 
-          // Fire detection alerts
+          // Fire detection alerts — only surface confirmed + alert-raising detections,
+          // matching the backend gate for alarms and drawn bounding boxes.
           if (data.fire_results && data.fire_results.length > 0) {
-            newAlerts.push({
-              cameraId: cameraId,
-              type: 'fire',
-              severity: 'critical',
-              timestamp: new Date().toISOString(),
-              description: 'Fire detected!'
+            const firedAlerts = data.fire_results.filter(r => r.confirmed && r.alert);
+            firedAlerts.forEach(r => {
+              const cls = (r.class || 'fire').toUpperCase();
+              newAlerts.push({
+                cameraId: cameraId,
+                type: 'fire',
+                severity: r.class === 'fire' ? 'critical' : 'high',
+                timestamp: new Date().toISOString(),
+                description: `${cls} detected (${(r.confidence * 100).toFixed(0)}% confidence)`
+              });
             });
           }
 

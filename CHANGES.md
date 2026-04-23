@@ -123,4 +123,45 @@ Summary of changes to facial_recognition_system.py:
   preprocessing) → (1, H, W, 1) tensor → argmax over the 7 FER-2013 labels. No Haar cascade, no second face-detection pass.                             
   - Removed the 30% padding in process_frame (facial_recognition_system.py:418) — the Mini-Xception CNN is now fed the tight InsightFace bbox directly. 
   If accuracy looks weak on certain angles, add a small ~10% pad back in; Haar's 30% is no longer warranted.                                            
-  - Updated the TF-on-CPU comment block, class docstring, and process_frame docstring to reflect the new pipeline.           
+  - Updated the TF-on-CPU comment block, class docstring, and process_frame docstring to reflect the new pipeline.
+
+# Fire & smoke detection overhaul — 2026-04-23
+
+Swapped the fire/smoke model for the HuggingFace **TommyNgx/YOLOv10-Fire-and-Smoke-Detection** (`fire_and_smoke_model_huggingface/best.pt`), removed the 4-level severity system, and added several false-positive filters.
+
+## Why
+The previous model (`models/fire_smoke_best.pt`, luminous0219 YOLOv8n) produced frequent false positives on grey walls, reflections, and warm-coloured objects. The severity ladder (`low`/`medium`/`high`/`critical`) mixed confidence and box size into one label, used `low` as a silent-reject signal, and made tuning opaque.
+
+## `fire_detection_system.py` — rewritten
+- Default model path: `fire_and_smoke_model_huggingface/best.pt`.
+- Class names pulled from `model.names` and normalised to lowercase (`{0: 'fire', 1: 'smoke'}`).
+- **Dropped `_calculate_severity` and the `severity` field entirely.** The detection dict now exposes `confirmed` and `alert` as the only gates.
+- **Per-class confidence thresholds** — fire `0.40`, smoke `0.55` (smoke is far more FP-prone, so it's stricter).
+- **Size sanity filters** — reject boxes smaller than 0.3% or larger than 85% of frame area.
+- **HSV colour verification** —
+  - fire: ≥12% of ROI pixels must be warm (hue ≤25 or ≥160) **and** saturated (S≥90, V≥120).
+  - smoke: ≥55% low-saturation pixels (S≤60) that aren't pitch black (V≥40), plus a non-uniform-brightness check to reject clear sky / flat walls.
+- **Multi-frame IoU confirmation** kept; confirmation window reduced from 8 to 6 frames now that the above filters remove most single-frame noise.
+- Alert cooldown key coarsened (`class_x//40_y//40`) so a slightly-drifting true-positive box isn't treated as a brand-new alert each frame.
+- `draw_detections` only draws **confirmed** boxes; non-confirmed candidates are invisible.
+- Statistics extended with `rejected_by_size` and `rejected_by_color` counters for tuning.
+
+## Downstream callsite updates
+- `app.py` — fire-processing thread logs fire alerts based on `class == 'fire' and alert`, not severity. `_log_detection_if_needed` and `_create_alarm_if_needed` now require `confirmed` (and `alert` for alarms) and map severity simply: fire → `critical`, smoke → `high`, so the DB column stays populated without resurrecting the ladder. The `has_alarm` banner/snapshot trigger also requires confirmed+alert fire results.
+- `gui_application.py` — top status uses `confirmed` + `class == 'fire' && alert` for the red banner; fire log only accepts confirmed detections; the "Severity" column is kept for layout compatibility but now derived (`fire` → `CRITICAL`, `smoke` → `HIGH`).
+- `frontend/src/App.js` — **this was the source of the "ghost alerts" bug**: the Recent Activity panel was pushing a "Fire Detection Alert" on *any* non-empty `fire_results`, including unconfirmed single-frame candidates. Since my backend tightening limited drawn boxes and DB alarms to `confirmed && alert`, the frontend was showing alerts that had no matching bounding box and no alarm-dashboard entry. Frontend now filters `fire_results` to `confirmed && alert` before building Recent Activity entries, and uses the same severity mapping as the backend. Requires a frontend rebuild to take effect.
+
+## Files touched
+- `fire_detection_system.py` — rewrite.
+- `app.py` — three callsites (thread log, detection-log writer, alarm creator) plus `has_alarm` trigger.
+- `gui_application.py` — status label, fire-log filter, `add_to_fire_log` severity derivation.
+- `frontend/src/App.js` — fire alert gate.
+
+## Follow-up suggestions (not implemented)
+1. Per-camera ignore-regions to mask chronic FP spots (signs, radiators, windows).
+2. Temporal flicker check for fire (ROI intensity stddev over N frames) to separate real flames from static warm objects.
+3. Day/night-aware thresholds — raise the fire threshold in low-light frames (headlights, streetlights look like fire).
+4. Higher YOLO `imgsz` (960 or 1280) on high-resolution cameras to cut FPs at distance.
+5. Collect ~100–200 hard-negative frames from the real cameras and fine-tune the HuggingFace checkpoint on them — highest-leverage fix if FPs persist.
+6. Cross-class agreement bonus: treat co-located fire+smoke as higher confidence than either alone.
+           

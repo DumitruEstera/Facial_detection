@@ -516,15 +516,14 @@ class IntegratedSecurityGUI:
             # Update status label
             status_text = ""
             if fire_results:
-                critical_fires = [f for f in fire_results if f['severity'] == 'critical']
-                if critical_fires:
-                    status_text = "🚨 CRITICAL FIRE ALERT!"
+                confirmed = [f for f in fire_results if f.get('confirmed')]
+                fire_alerts = [f for f in confirmed if f.get('class') == 'fire' and f.get('alert')]
+                if fire_alerts:
+                    status_text = "🚨 FIRE ALERT!"
                     self.status_label.config(foreground='red')
-                else:
-                    high_severity = [f for f in fire_results if f['severity'] in ['high', 'critical']]
-                    if high_severity:
-                        status_text = "⚠️ Fire/Smoke Detected"
-                        self.status_label.config(foreground='orange')
+                elif confirmed:
+                    status_text = "⚠️ Fire/Smoke Detected"
+                    self.status_label.config(foreground='orange')
             
             self.status_label.config(text=status_text)
             
@@ -536,7 +535,8 @@ class IntegratedSecurityGUI:
                 self.add_to_plate_log(result)
             
             for result in fire_results:
-                self.add_to_fire_log(result)
+                if result.get('confirmed'):
+                    self.add_to_fire_log(result)
                 
         except queue.Empty:
             pass
@@ -580,11 +580,11 @@ class IntegratedSecurityGUI:
         time_str = result['timestamp'].strftime("%H:%M:%S")
         class_name = result['class'].upper()
         confidence_str = f"{result['confidence']:.2f}"
-        severity = result['severity'].upper()
+        # "Severity" column kept for layout compatibility; derived from class.
+        severity = 'CRITICAL' if result.get('class') == 'fire' else 'HIGH'
         alert_status = "🚨 YES" if result.get('alert', False) else "No"
-        
-        # Color code based on severity
-        item = self.fire_log_tree.insert('', 0, values=(time_str, class_name, 
+
+        item = self.fire_log_tree.insert('', 0, values=(time_str, class_name,
                                                         confidence_str, severity, alert_status))
         
         # Update statistics

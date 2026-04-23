@@ -1577,9 +1577,9 @@ class EnhancedSecuritySystemAPI:
                         if confirmed:
                             logger.debug(f"🔥 Confirmed {len(confirmed)} fire/smoke in {processing_time:.3f}s")
 
-                        critical = [r for r in confirmed if r.get('severity') == 'critical']
-                        if critical:
-                            logger.warning(f"🚨 CRITICAL FIRE ALERT! {len(critical)} critical detection(s)")
+                        fire_alerts = [r for r in confirmed if r.get('class') == 'fire' and r.get('alert')]
+                        if fire_alerts:
+                            logger.warning(f"🚨 FIRE ALERT! {len(fire_alerts)} confirmed fire detection(s)")
                     
                     try:
                         self.fire_results_queue.put((frame_id, camera_id, fire_results), block=False)
@@ -1848,12 +1848,14 @@ class EnhancedSecuritySystemAPI:
                                         }
                                     )
                                 for r in (fire_results or []):
+                                    if not r.get('confirmed'):
+                                        continue
                                     cls = r.get('class') or 'fire'
                                     self._log_detection_if_needed(
                                         camera_id, 'fire',
                                         subject=cls,
                                         confidence=r.get('confidence'),
-                                        severity=r.get('severity', 'high'),
+                                        severity='critical' if cls == 'fire' else 'high',
                                         status='alert' if r.get('alert') else 'detected',
                                         details={
                                             'class': cls,
@@ -1900,7 +1902,9 @@ class EnhancedSecuritySystemAPI:
                                     if r.get('name') == 'Unknown':
                                         has_alarm = True
                                         break
-                            if not has_alarm and (fire_results or
+                            confirmed_fire = [r for r in (fire_results or [])
+                                              if r.get('confirmed') and r.get('alert')]
+                            if not has_alarm and (confirmed_fire or
                                     [r for r in (har_results or []) if r.get('class') != 'normal'] or
                                     weapon_results):
                                 has_alarm = True
@@ -1947,16 +1951,18 @@ class EnhancedSecuritySystemAPI:
                             except Exception as _zerr:
                                 logger.error(f"Zone authorization check failed: {_zerr}")
 
-                            # Fire alarms
+                            # Fire alarms — only on confirmed detections that raised an alert
                             if fire_results:
                                 for r in fire_results:
-                                    sev = r.get('severity', 'high')
-                                    cls = r.get('class', 'fire').upper()
+                                    if not (r.get('confirmed') and r.get('alert')):
+                                        continue
+                                    cls_lower = r.get('class', 'fire')
+                                    sev = 'critical' if cls_lower == 'fire' else 'high'
                                     self._create_alarm_if_needed(
                                         camera_id, 'fire', sev,
-                                        f"{cls} detected ({(r.get('confidence', 0) * 100):.0f}% confidence)",
+                                        f"{cls_lower.upper()} detected ({(r.get('confidence', 0) * 100):.0f}% confidence)",
                                         snapshot_b64,
-                                        {'class': r.get('class'), 'confidence': r.get('confidence'),
+                                        {'class': cls_lower, 'confidence': r.get('confidence'),
                                          'area_ratio': r.get('area_ratio')}
                                     )
 
