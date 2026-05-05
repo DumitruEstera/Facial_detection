@@ -95,23 +95,6 @@ from faiss_index import FaissIndex
 logger = logging.getLogger(__name__)
 
 
-_DB_WIPE_WARNING = (
-    "╔══════════════════════════════════════════════════════════════════════╗\n"
-    "║                   ⚠️  DATABASE WIPE REQUIRED ⚠️                       ║\n"
-    "╠══════════════════════════════════════════════════════════════════════╣\n"
-    "║ The embedding model has changed from FaceNet (facenet-pytorch) to    ║\n"
-    "║ InsightFace (buffalo_sc, ArcFace). The two embedding spaces are NOT  ║\n"
-    "║ compatible — any existing rows in the `face_embeddings` table are    ║\n"
-    "║ invalid and will NEVER match a live face.                            ║\n"
-    "║                                                                      ║\n"
-    "║ ACTION: Truncate the `face_embeddings` table and re-register every   ║\n"
-    "║ person through the normal registration flow.                         ║\n"
-    "║                                                                      ║\n"
-    "║   psql> TRUNCATE TABLE face_embeddings RESTART IDENTITY CASCADE;     ║\n"
-    "╚══════════════════════════════════════════════════════════════════════╝"
-)
-
-
 class FacialRecognitionSystem:
     """
     Consolidated facial-recognition pipeline backed by InsightFace (detection +
@@ -131,8 +114,6 @@ class FacialRecognitionSystem:
 
     def __init__(self, db_config: Dict, camera_id: str = "0"):
         self.camera_id = camera_id
-
-        print(_DB_WIPE_WARNING)
 
         print("Initializing database connection...")
         self.db = DatabaseManager(**db_config)
@@ -210,7 +191,6 @@ class FacialRecognitionSystem:
                         f"with dim={first_dim} (expected {self.EMBEDDING_DIM}). "
                         "These are FaceNet-era and unusable — skipping load."
                     )
-                    print(_DB_WIPE_WARNING)
                     return
                 print(f"Loading {len(embeddings_data)} embeddings into index...")
                 self.faiss_index.rebuild_index(embeddings_data)
