@@ -1,27 +1,45 @@
-import React from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 
-const RecentActivity = ({ alerts = [] }) => {
-  // Convert real alerts to display format, take last 10
-  const recentAlerts = alerts.slice(0, 10);
+const API_BASE = 'http://localhost:8000';
 
-  const getAlertType = (alert) => {
-    if (alert.type === 'unauthorized' || alert.type === 'fire' || alert.type === 'weapon' || alert.type === 'har') {
-      return 'alert';
+const getAuthHeaders = () => {
+  const token = localStorage.getItem('auth_token');
+  return token ? { 'Authorization': `Bearer ${token}` } : {};
+};
+
+const typeLabels = {
+  face: 'Unauthorized Face',
+  fire: 'Fire / Smoke',
+  har: 'Action Recognition',
+  weapon: 'Weapon Detected',
+  unauthorized_zone: 'Restricted Zone',
+};
+
+// `refreshKey` changes whenever a new live alert arrives, prompting a re-fetch
+// so the feed picks up the freshly persisted alarm.
+const RecentActivity = ({ onAlarmClick, refreshKey }) => {
+  const [alarms, setAlarms] = useState([]);
+
+  const fetchRecent = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/alarms?limit=10&offset=0`, { headers: getAuthHeaders() });
+      const data = await res.json();
+      setAlarms(data.alarms || []);
+    } catch (err) {
+      console.error('Error fetching recent activity:', err);
     }
-    return 'info';
-  };
+  }, []);
 
-  const getAlertMessage = (alert) => {
-    switch (alert.type) {
-      case 'unauthorized': return 'Unauthorized Access Alert';
-      case 'fire': return 'Fire Detection Alert';
-      case 'har': return 'Action Recognition Alert';
-      case 'weapon': return 'Weapon Detected';
-      case 'motion': return 'Motion Detected';
-      case 'intrusion': return 'Perimeter Breach';
-      default: return alert.description || 'System Event';
-    }
-  };
+  useEffect(() => {
+    fetchRecent();
+    const interval = setInterval(fetchRecent, 10000);
+    return () => clearInterval(interval);
+  }, [fetchRecent]);
+
+  // Re-fetch promptly when a new live alert comes in over the WebSocket
+  useEffect(() => {
+    if (refreshKey) fetchRecent();
+  }, [refreshKey, fetchRecent]);
 
   const formatTime = (timestamp) => {
     const date = new Date(timestamp);
@@ -32,25 +50,30 @@ const RecentActivity = ({ alerts = [] }) => {
     <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
       <h3 className="text-lg font-semibold text-slate-800 mb-6">Recent Activity</h3>
 
-      <div className="space-y-6 max-h-80 overflow-y-auto pr-2">
-        {recentAlerts.length > 0 ? (
-          recentAlerts.map((alert, index) => (
-            <div key={index} className="flex gap-4">
+      <div className="space-y-2 max-h-80 overflow-y-auto pr-2">
+        {alarms.length > 0 ? (
+          alarms.map((alarm) => (
+            <button
+              key={alarm.id}
+              onClick={() => onAlarmClick && onAlarmClick(alarm.id)}
+              className="w-full flex gap-4 text-left rounded-lg p-2 -m-2 hover:bg-gray-50 transition-colors cursor-pointer focus:outline-none focus:ring-2 focus:ring-[#3374D0]/30"
+              title="Open alarm details"
+            >
               <div className={`w-2.5 h-2.5 rounded-full mt-1.5 shrink-0 ${
-                getAlertType(alert) === 'alert' ? 'bg-red-500' : 'bg-green-500'
+                alarm.status === 'unresolved' ? 'bg-red-500' : 'bg-green-500'
               }`} />
               <div className="space-y-1">
                 <p className="text-sm text-slate-700 leading-tight">
                   <span className="font-semibold text-slate-900 mr-2">
-                    {formatTime(alert.timestamp)}
+                    {formatTime(alarm.created_at)}
                   </span>
-                  {getAlertMessage(alert)}
-                  {alert.cameraId && (
-                    <span className="block text-xs text-gray-400 mt-0.5">({alert.cameraId})</span>
+                  {typeLabels[alarm.type] || alarm.description || 'System Event'}
+                  {alarm.camera_id && (
+                    <span className="block text-xs text-gray-400 mt-0.5">({alarm.camera_id})</span>
                   )}
                 </p>
               </div>
-            </div>
+            </button>
           ))
         ) : (
           <div className="flex gap-4">

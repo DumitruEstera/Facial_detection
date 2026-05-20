@@ -29,7 +29,7 @@ const typeLabels = {
   unauthorized_zone: 'Restricted Zone',
 };
 
-const AlarmManagement = () => {
+const AlarmManagement = ({ initialAlarmId = null, onInitialAlarmHandled }) => {
   const [alarms, setAlarms] = useState([]);
   const [total, setTotal] = useState(0);
   const [stats, setStats] = useState({});
@@ -132,6 +132,15 @@ const AlarmManagement = () => {
       console.error('Error fetching alarm detail:', err);
     }
   };
+
+  // When navigated here from Recent Activity, auto-open that alarm's detail
+  useEffect(() => {
+    if (initialAlarmId) {
+      openDetail(initialAlarmId);
+      if (onInitialAlarmHandled) onInitialAlarmHandled();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialAlarmId]);
 
   const toggleSelect = (id) => {
     setSelectedIds(prev => {

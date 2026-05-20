@@ -56,6 +56,8 @@ function App() {
   const [cameras, setCameras] = useState(INITIAL_CAMERAS);
   const [alerts, setAlerts] = useState([]);
   const [activeTab, setActiveTab] = useState('dashboard');
+  const [openAlarmId, setOpenAlarmId] = useState(null);
+  const [alarmRefreshKey, setAlarmRefreshKey] = useState(0);
   const [systemStatus, setSystemStatus] = useState({});
   const [isConnected, setIsConnected] = useState(false);
   const [recentLogs, setRecentLogs] = useState([]);
@@ -168,6 +170,8 @@ function App() {
           // Update alerts
           if (newAlerts.length > 0) {
             setAlerts(prevAlerts => [...newAlerts, ...prevAlerts].slice(0, 100));
+            // Nudge the Recent Activity feed to re-fetch the newly persisted alarm
+            setAlarmRefreshKey(k => k + 1);
           }
 
           // Update recent logs
@@ -383,6 +387,12 @@ function App() {
     }
   };
 
+  // Open a specific alarm's detail from the Recent Activity feed
+  const handleOpenAlarm = (alarmId) => {
+    setOpenAlarmId(alarmId);
+    setActiveTab('alarms');
+  };
+
   const handleLogin = (user) => {
     setIsAuthenticated(true);
     setUserRole(user.role || 'user');
@@ -461,7 +471,7 @@ function App() {
                 onToggleWeaponDetection={toggleWeaponDetection}
                 isAdmin={isAdmin}
               />
-              <RecentActivity alerts={alerts} />
+              <RecentActivity onAlarmClick={handleOpenAlarm} refreshKey={alarmRefreshKey} />
             </div>
           </div>
         )}
@@ -474,7 +484,10 @@ function App() {
 
         {activeTab === 'alarms' && (
           <div className="max-w-[1600px] mx-auto">
-            <AlarmManagement />
+            <AlarmManagement
+              initialAlarmId={openAlarmId}
+              onInitialAlarmHandled={() => setOpenAlarmId(null)}
+            />
           </div>
         )}
 
