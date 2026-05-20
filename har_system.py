@@ -157,7 +157,7 @@ class HumanActionRecognitionSystem:
     Real-time human action recognition for the security system.
 
     Usage mirrors FireDetectionSystem:
-        har = HumanActionRecognitionSystem(model_path="har/best_model.pth")
+        har = HumanActionRecognitionSystem(model_path="models/har/best_model.pth")
         results = har.process_frame(frame)        # feed every frame
         annotated = har.draw_detections(frame, results)
     """
@@ -169,7 +169,7 @@ class HumanActionRecognitionSystem:
 
     def __init__(
         self,
-        model_path: str = "har/best_model.pth",
+        model_path: str = "models/har/best_model.pth",
         device: str = "auto",
         confidence_threshold: float = 0.5,
         clip_interval_frames: int = 30,
@@ -450,4 +450,4 @@ if __name__ == "__main__":
 
     except FileNotFoundError as e:
         print(f"\n❌ {e}")
-        print("\nPlace your trained model at: har/best_model.pth")
+        print("\nPlace your trained model at: models/har/best_model.pth")

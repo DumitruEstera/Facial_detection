@@ -25,7 +25,7 @@ from ultralytics import YOLO
 class FireDetectionSystem:
     """Fire and smoke detection using a YOLOv10 HuggingFace model."""
 
-    def __init__(self, model_path: str = "fire_and_smoke_model_huggingface/best.pt"):
+    def __init__(self, model_path: str = "models/fire_and_smoke/best.pt"):
         if not Path(model_path).exists():
             raise FileNotFoundError(f"Fire detection model not found at {model_path}")
 

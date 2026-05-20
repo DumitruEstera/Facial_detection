@@ -210,7 +210,7 @@ class EnhancedSecuritySystemAPI:
             self.fire_detection_enabled = False
         
         # Initialize Human Action Recognition system
-        har_model_path = "har/best_model.pth"
+        har_model_path = "models/har/best_model.pth"
         try:
             import os
             abs_path = os.path.abspath(har_model_path)
@@ -235,7 +235,7 @@ class EnhancedSecuritySystemAPI:
             self.har_enabled = False
         
         # Initialize Weapon Detection system
-        weapon_model_path = "weapon_detection_model/best.pt"
+        weapon_model_path = "models/weapon/best.pt"
         try:
             self.weapon_system = WeaponDetectionSystem(model_path=weapon_model_path)
             self.weapon_detection_enabled = True
@@ -612,12 +612,12 @@ class EnhancedSecuritySystemAPI:
             logger.info(f"🏃 Human Action Recognition: {'enabled' if enabled else 'disabled'}")
             if self.har_system is None:
                 logger.warning("⚠️ HAR toggled but model is not loaded. "
-                               "Place your trained model at har/best_model.pth")
+                               "Place your trained model at models/har/best_model.pth")
                 return {
                     "status": "warning",
                     "har_enabled": self.har_enabled,
                     "message": "HAR toggled but model is not loaded. "
-                               "Place your trained model at har/best_model.pth and restart the server."
+                               "Place your trained model at models/har/best_model.pth and restart the server."
                 }
             return {"status": "success", "har_enabled": self.har_enabled}
         
@@ -646,7 +646,7 @@ class EnhancedSecuritySystemAPI:
                     "status": "warning",
                     "weapon_detection_enabled": self.weapon_detection_enabled,
                     "message": "Weapon detection toggled but model is not loaded. "
-                               "Place your trained model at weapon_detection_model/best.pt and restart the server."
+                               "Place your trained model at models/weapon/best.pt and restart the server."
                 }
             return {"status": "success", "weapon_detection_enabled": self.weapon_detection_enabled}
 

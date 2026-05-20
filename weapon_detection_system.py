@@ -17,7 +17,7 @@ import os
 class WeaponDetectionSystem:
     """Weapon detection using YOLOv8 trained model"""
 
-    def __init__(self, model_path: str = "weapon_detection_model/best.pt"):
+    def __init__(self, model_path: str = "models/weapon/best.pt"):
         """
         Initialize Weapon Detection System
 

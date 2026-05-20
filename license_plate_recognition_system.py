@@ -208,7 +208,7 @@ class LicensePlateRecognitionSystem:
 
     def __init__(self,
                  db: DatabaseManager,
-                 plate_detector_weights: str | Path = "best.pt",
+                 plate_detector_weights: str | Path = "models/license_plate/best.pt",
                  ocr_lang: List[str] = ['en'],
                  use_gpu: bool = True,
                  target_plate_width: int = 250,
