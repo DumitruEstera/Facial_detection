@@ -34,6 +34,7 @@ const PersonManagement = () => {
   const [regEmployeeId, setRegEmployeeId] = useState('');
   const [regDepartment, setRegDepartment] = useState('');
   const [regZones, setRegZones] = useState([]);
+  const [regFiles, setRegFiles] = useState([]);
 
   // Edit form state
   const [editName, setEditName] = useState('');
@@ -138,12 +139,19 @@ const PersonManagement = () => {
       });
       const data = await response.json();
       if (response.ok) {
-        showMessage(`Person '${regName}' registered successfully. You can now upload face images.`);
+        // If face images were selected in the form, upload them now using the
+        // person_id returned by the register endpoint.
+        if (regFiles.length > 0 && data.person_id) {
+          await handleFaceUpload(data.person_id, regFiles);
+        } else {
+          showMessage(`Person '${regName}' registered successfully. You can now upload face images.`);
+        }
         setShowRegisterForm(false);
         setRegName('');
         setRegEmployeeId('');
         setRegDepartment('');
         setRegZones([]);
+        setRegFiles([]);
         fetchPersons();
         fetchDepartments();
       } else {
@@ -362,6 +370,21 @@ const PersonManagement = () => {
                 </div>
               )}
             </div>
+            <div className="sm:col-span-3">
+              <label className="block text-sm font-medium text-gray-700 mb-1">Face Images</label>
+              <label className="flex items-center gap-2 px-4 py-2 border border-dashed border-gray-300 rounded-lg cursor-pointer hover:bg-gray-50 transition-colors w-fit text-sm text-slate-600">
+                <Upload className="w-4 h-4 text-[#3374D0]" />
+                {regFiles.length > 0 ? `${regFiles.length} image(s) selected` : 'Choose face images to upload'}
+                <input
+                  type="file"
+                  multiple
+                  accept="image/*"
+                  className="hidden"
+                  onChange={(e) => setRegFiles(Array.from(e.target.files))}
+                />
+              </label>
+              <p className="text-xs text-gray-500 mt-1">Optional. Images are uploaded automatically after the person is registered so they can be recognized right away.</p>
+            </div>
             <div className="sm:col-span-3 flex gap-3">
               <button
                 type="submit"
@@ -371,7 +394,7 @@ const PersonManagement = () => {
               </button>
               <button
                 type="button"
-                onClick={() => setShowRegisterForm(false)}
+                onClick={() => { setShowRegisterForm(false); setRegFiles([]); }}
                 className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm font-medium"
               >
                 Cancel
