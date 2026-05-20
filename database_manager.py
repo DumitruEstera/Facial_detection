@@ -2,47 +2,82 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import numpy as np
 from typing import List, Dict, Optional
+import os
+import threading
 import pickle
 import bcrypt
 import json
 from datetime import datetime
 
 class DatabaseManager:
-    def __init__(self, host='localhost', database='facial_recognition',
-                 user='postgres', password='incorect'):
+    """Postgres access layer with per-thread connections.
+
+    A single libpq connection/cursor is NOT safe to share across threads.
+    This object is used from many threads at once (the frame-processing
+    worker threads plus FastAPI's request threads), so each thread gets its
+    own lazily-created connection and cursor, exposed through the ``conn``
+    and ``cursor`` properties. Existing call sites that use ``self.conn`` /
+    ``self.cursor`` keep working unchanged — they simply resolve to the
+    calling thread's connection.
+    """
+
+    def __init__(self, host=None, database=None, user=None, password=None):
+        # Fall back to environment variables (then local-dev defaults) so DB
+        # credentials are never hardcoded in source.
         self.connection_params = {
-            'host': host,
-            'database': database,
-            'user': user,
-            'password': password,
+            'host': host or os.environ.get("DB_HOST", "localhost"),
+            'database': database or os.environ.get("DB_NAME", "facial_recognition"),
+            'user': user or os.environ.get("DB_USER", "postgres"),
+            'password': password or os.environ.get("DB_PASSWORD", "incorect"),
             # Disable libpq TLS for localhost. Postgres 17 negotiates TLS 1.3 by
             # default; psycopg2-binary's bundled libpq/OpenSSL collides with the
             # OpenSSL that torch/tensorflow/faiss have already loaded in-process
             # and segfaults during connect. Local sockets don't need TLS.
             'sslmode': 'disable',
         }
-        self.conn = None
-        self.cursor = None
-        
+        # Per-thread connection/cursor storage.
+        self._local = threading.local()
+
+    def _ensure_connection(self):
+        """Create (or recreate) this thread's connection/cursor if needed."""
+        conn = getattr(self._local, 'conn', None)
+        if conn is None or conn.closed:
+            conn = psycopg2.connect(**self.connection_params)
+            self._local.conn = conn
+            self._local.cursor = conn.cursor(cursor_factory=RealDictCursor)
+        return self._local.conn
+
+    @property
+    def conn(self):
+        return self._ensure_connection()
+
+    @property
+    def cursor(self):
+        self._ensure_connection()
+        return self._local.cursor
+
     def connect(self):
-        """Establish database connection"""
+        """Establish this thread's database connection and ensure schema exists."""
         try:
-            self.conn = psycopg2.connect(**self.connection_params)
-            self.cursor = self.conn.cursor(cursor_factory=RealDictCursor)
+            self._ensure_connection()
             print("Database connection established")
             # Create tables if they don't exist
             self._create_tables()
         except Exception as e:
             print(f"Error connecting to database: {e}")
             raise
-            
+
     def disconnect(self):
-        """Close database connection"""
-        if self.cursor:
-            self.cursor.close()
-        if self.conn:
-            self.conn.close()
-            
+        """Close the current thread's database connection."""
+        cursor = getattr(self._local, 'cursor', None)
+        conn = getattr(self._local, 'conn', None)
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+        self._local.cursor = None
+        self._local.conn = None
+
     def _create_tables(self):
         """Create necessary tables if they don't exist"""
         try:
@@ -771,17 +806,30 @@ class DatabaseManager:
             raise
 
     def get_recent_alarm(self, camera_id: str, alarm_type: str,
-                         cooldown_seconds: int = 30) -> Optional[Dict]:
-        """Get the most recent alarm of same type+camera within cooldown window (for deduplication)"""
+                         cooldown_seconds: int = 30,
+                         dedup_subject: str = None) -> Optional[Dict]:
+        """Get the most recent matching alarm within the cooldown window (for
+        deduplication). When `dedup_subject` is given, only alarms whose stored
+        detection_metadata->>'dedup_subject' matches are considered, so distinct
+        concurrent subjects (two intruders, knife vs gun) aren't collapsed."""
         try:
-            query = """
+            # NOTE: the interval must be built with `(%s || ' seconds')::interval`
+            # — a `%s` placeholder inside a quoted literal (INTERVAL '%s seconds')
+            # is NOT parameterized by psycopg2 and silently breaks.
+            params = [camera_id, alarm_type, str(cooldown_seconds)]
+            subject_clause = ""
+            if dedup_subject is not None:
+                subject_clause = " AND detection_metadata->>'dedup_subject' = %s"
+                params.append(dedup_subject)
+            query = f"""
                 SELECT * FROM alarms
                 WHERE camera_id = %s AND type = %s AND status = 'unresolved'
-                  AND created_at > NOW() - INTERVAL '%s seconds'
+                  AND created_at > NOW() - (%s || ' seconds')::interval
+                  {subject_clause}
                 ORDER BY created_at DESC
                 LIMIT 1
             """
-            self.cursor.execute(query, (camera_id, alarm_type, cooldown_seconds))
+            self.cursor.execute(query, params)
             return self.cursor.fetchone()
         except Exception as e:
             print(f"Error getting recent alarm: {e}")

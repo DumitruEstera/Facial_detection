@@ -16,7 +16,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 import csv
 import io
+import os
+import secrets
+from dotenv import load_dotenv
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+
+# Load variables from a local .env file (if present) before any module-level
+# config (JWT_SECRET, DB_CONFIG) is read below. Real environment variables
+# always take precedence over .env values.
+load_dotenv()
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Tuple
 import cv2
@@ -124,11 +132,27 @@ class BulkUpdateAlarmsRequest(BaseModel):
     status: str
 
 # JWT Configuration
-JWT_SECRET = "security-dashboard-secret-key-change-in-production"
+# Read the signing secret from the environment. If it's unset we fall back to a
+# random per-process secret so we never ship a known/hardcoded key — the
+# trade-off is that issued tokens stop validating after a restart, so set
+# JWT_SECRET in the environment for any real deployment.
+JWT_SECRET = os.environ.get("JWT_SECRET")
+if not JWT_SECRET:
+    JWT_SECRET = secrets.token_urlsafe(32)
+    logger.warning(
+        "⚠️ JWT_SECRET not set — using a random per-process secret. "
+        "Tokens will be invalidated on restart. Set JWT_SECRET in the environment."
+    )
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_HOURS = 8
 
 security = HTTPBearer()
+
+# Reference to the live DatabaseManager, set by EnhancedSecuritySystemAPI on
+# init. Used by get_current_user to re-validate tokens against the DB so that
+# deleted users and role changes take effect immediately (JWTs are otherwise
+# valid until they expire).
+_db_ref = None
 
 def create_jwt_token(user_data: dict) -> str:
     payload = {
@@ -150,19 +174,30 @@ def decode_jwt_token(token: str) -> dict:
         raise HTTPException(status_code=401, detail="Invalid token")
 
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
-    return decode_jwt_token(credentials.credentials)
+    payload = decode_jwt_token(credentials.credentials)
+    # Re-validate against the DB so a deleted user is rejected and a role change
+    # takes effect on the next request — not only after the token expires.
+    if _db_ref is not None:
+        user = _db_ref.get_user_by_id(payload.get("user_id"))
+        if not user:
+            raise HTTPException(status_code=401, detail="User no longer exists")
+        # Trust the current DB role/name over the (possibly stale) token claims.
+        payload["role"] = user["role"]
+        payload["full_name"] = user.get("full_name") or payload.get("full_name", "")
+    return payload
 
 def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
     if current_user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
     return current_user
 
-# Database configuration
+# Database configuration — read from the environment so credentials aren't
+# committed to source. Defaults match the local dev Postgres setup.
 DB_CONFIG = {
-    'host': 'localhost',
-    'database': 'facial_recognition',
-    'user': 'postgres',
-    'password': 'incorect'
+    'host': os.environ.get("DB_HOST", "localhost"),
+    'database': os.environ.get("DB_NAME", "facial_recognition"),
+    'user': os.environ.get("DB_USER", "postgres"),
+    'password': os.environ.get("DB_PASSWORD", "incorect"),
 }
 
 
@@ -195,7 +230,11 @@ class EnhancedSecuritySystemAPI:
         # Initialize systems
         self.db = DatabaseManager(**DB_CONFIG)
         self.db.connect()
-        
+        # Expose the DB to the auth dependency so tokens are re-validated
+        # against the live users table (immediate revocation on delete/role change).
+        global _db_ref
+        _db_ref = self.db
+
         self.face_system = FacialRecognitionSystem(DB_CONFIG, camera_id="0")
         self.plate_system = LicensePlateRecognitionSystem(DB_CONFIG)
         
@@ -278,20 +317,19 @@ class EnhancedSecuritySystemAPI:
         self.fire_results_queue = queue.Queue(maxsize=10)
         self.har_results_queue = queue.Queue(maxsize=10)          # NEW: HAR results queue
         self.weapon_results_queue = queue.Queue(maxsize=10)       # Weapon results queue
-        self.processed_frame_queue = queue.Queue(maxsize=10)
-        
-        self.client_connections: List[WebSocket] = []
-        
+        # Output fan-out: each connected WebSocket client gets its OWN queue so
+        # clients don't steal frames from one another. The merging thread
+        # broadcasts every processed frame into all client queues.
+        self.client_queues: Dict[WebSocket, queue.Queue] = {}
+        self.client_lock = threading.Lock()
+        self.output_queue_maxsize = 10
+
         # Frame management
         self.frame_skip = 1
         self.frame_counter = 0
         self.frame_id = 0
         self.demographics_request_id = 0
-        
-        # Track unknown faces across frames
-        self.unknown_faces_cache = {}
-        self.unknown_faces_lock = threading.Lock()
-        
+
         # Alarm deduplication: tracks last alarm time per (camera_id, type)
         self.alarm_cooldowns = {}
         self.alarm_cooldown_seconds = 30
@@ -381,7 +419,7 @@ class EnhancedSecuritySystemAPI:
             }
         
         @self.app.get("/api/status")
-        async def get_status():
+        async def get_status(current_user: dict = Depends(get_current_user)):
             stats = self.db.get_statistics()
             # Check IP camera (CAM-02) status
             cam02_streaming = False
@@ -408,24 +446,31 @@ class EnhancedSecuritySystemAPI:
             }
         
         @self.app.post("/api/camera/start")
-        async def start_camera():
+        async def start_camera(current_user: dict = Depends(require_admin)):
             try:
                 if not self.is_streaming:
-                    self.video_capture = cv2.VideoCapture(0)
-                    if self.video_capture.isOpened():
+                    # Open the device off the event loop — VideoCapture can block
+                    # for seconds, which would freeze all HTTP/WebSocket handling.
+                    cap = await asyncio.to_thread(cv2.VideoCapture, 0)
+                    opened = await asyncio.to_thread(cap.isOpened)
+                    if opened:
+                        self.video_capture = cap
                         self.is_streaming = True
                         logger.info("📹 Camera started")
                         return {"status": "success", "message": "Camera started"}
                     else:
+                        await asyncio.to_thread(cap.release)
                         raise HTTPException(status_code=500, detail="Failed to open camera")
                 else:
                     return {"status": "info", "message": "Camera already running"}
+            except HTTPException:
+                raise
             except Exception as e:
                 logger.error(f"❌ Error starting camera: {e}")
                 raise HTTPException(status_code=500, detail=str(e))
 
         @self.app.post("/api/camera/stop")
-        async def stop_camera():
+        async def stop_camera(current_user: dict = Depends(require_admin)):
             try:
                 if self.is_streaming:
                     self.is_streaming = False
@@ -442,7 +487,7 @@ class EnhancedSecuritySystemAPI:
                 raise HTTPException(status_code=500, detail=str(e))
 
         @self.app.post("/api/camera/stop-all")
-        async def stop_all_cameras():
+        async def stop_all_cameras(current_user: dict = Depends(require_admin)):
             """Stop all cameras (laptop + IP)"""
             try:
                 self.is_streaming = False
@@ -463,7 +508,7 @@ class EnhancedSecuritySystemAPI:
                 raise HTTPException(status_code=500, detail=str(e))
         
         @self.app.post("/api/camera/add-ip")
-        async def add_ip_camera(request_data: dict):
+        async def add_ip_camera(request_data: dict, current_user: dict = Depends(require_admin)):
             """Add an IP camera (e.g. phone via IP Webcam app)"""
             try:
                 url = request_data.get("url")          # e.g. "http://192.168.1.5:8080/video"
@@ -472,12 +517,16 @@ class EnhancedSecuritySystemAPI:
                 
                 if not url:
                     raise HTTPException(status_code=400, detail="URL is required")
-                
-                # Try to open the stream
-                cap = cv2.VideoCapture(url)
-                if not cap.isOpened():
+
+                # Open the stream off the event loop. An unreachable URL makes
+                # VideoCapture block for the full connection timeout, which would
+                # otherwise freeze all HTTP and WebSocket handling.
+                cap = await asyncio.to_thread(cv2.VideoCapture, url)
+                opened = await asyncio.to_thread(cap.isOpened)
+                if not opened:
+                    await asyncio.to_thread(cap.release)
                     raise HTTPException(status_code=500, detail=f"Could not open video stream: {url}")
-                
+
                 with self.cameras_lock:
                     # If camera_id already exists, release the old one
                     if camera_id in self.cameras:
@@ -516,7 +565,7 @@ class EnhancedSecuritySystemAPI:
                 raise HTTPException(status_code=500, detail=str(e))
         
         @self.app.post("/api/camera/remove-ip")
-        async def remove_ip_camera(request_data: dict):
+        async def remove_ip_camera(request_data: dict, current_user: dict = Depends(require_admin)):
             """Remove / disconnect an IP camera"""
             try:
                 camera_id = request_data.get("camera_id", "CAM-02")
@@ -544,7 +593,7 @@ class EnhancedSecuritySystemAPI:
                 raise HTTPException(status_code=500, detail=str(e))
         
         @self.app.get("/api/cameras/list")
-        async def list_cameras():
+        async def list_cameras(current_user: dict = Depends(get_current_user)):
             """List all active cameras"""
             result = []
             
@@ -623,7 +672,7 @@ class EnhancedSecuritySystemAPI:
         
         # ── NEW: HAR statistics endpoint ──────────────────────────────
         @self.app.get("/api/har/stats")
-        async def get_har_stats():
+        async def get_har_stats(current_user: dict = Depends(get_current_user)):
             """Get HAR system statistics"""
             if self.har_system is None:
                 return {"available": False, "message": "HAR system not loaded"}
@@ -652,7 +701,7 @@ class EnhancedSecuritySystemAPI:
 
         # ── Weapon Detection statistics endpoint ──────────────────
         @self.app.get("/api/weapon/stats")
-        async def get_weapon_stats():
+        async def get_weapon_stats(current_user: dict = Depends(get_current_user)):
             """Get Weapon Detection system statistics"""
             if self.weapon_system is None:
                 return {"available": False, "message": "Weapon detection system not loaded"}
@@ -937,7 +986,7 @@ class EnhancedSecuritySystemAPI:
                 raise HTTPException(status_code=500, detail=str(e))
 
         @self.app.get("/api/logs/vehicle")
-        async def get_vehicle_logs(limit: int = 50):
+        async def get_vehicle_logs(limit: int = 50, current_user: dict = Depends(get_current_user)):
             try:
                 logs = self.db.get_vehicle_access_logs(limit=limit)
                 return {"logs": convert_to_serializable(logs), "count": len(logs)}
@@ -1347,14 +1396,41 @@ class EnhancedSecuritySystemAPI:
 
         @self.app.websocket("/ws")
         async def websocket_endpoint(websocket: WebSocket):
+            # Authenticate before accepting. Browsers can't set Authorization
+            # headers on a WebSocket, so the JWT is passed as a query param:
+            #   ws://host/ws?token=<JWT>
+            token = websocket.query_params.get("token")
+            if not token:
+                await websocket.close(code=1008)  # policy violation
+                logger.warning("🔒 WebSocket rejected: missing token")
+                return
+            try:
+                payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            except jwt.PyJWTError:
+                await websocket.close(code=1008)
+                logger.warning("🔒 WebSocket rejected: invalid/expired token")
+                return
+
+            # Re-validate against the DB so a deleted user can't keep streaming
+            # the live feed until their token expires.
+            if not self.db.get_user_by_id(payload.get("user_id")):
+                await websocket.close(code=1008)
+                logger.warning("🔒 WebSocket rejected: user no longer exists")
+                return
+
             await websocket.accept()
-            self.client_connections.append(websocket)
-            logger.info(f"🔌 WebSocket client connected. Total: {len(self.client_connections)}")
+            # Register a per-client queue so this client receives its own copy
+            # of every frame instead of competing with other clients.
+            client_queue: queue.Queue = queue.Queue(maxsize=self.output_queue_maxsize)
+            with self.client_lock:
+                self.client_queues[websocket] = client_queue
+                client_count = len(self.client_queues)
+            logger.info(f"🔌 WebSocket client connected. Total: {client_count}")
 
             try:
                 while True:
                     try:
-                        message = self.processed_frame_queue.get(block=False)
+                        message = client_queue.get(block=False)
                         await websocket.send_text(json.dumps(message))
                     except queue.Empty:
                         pass
@@ -1368,9 +1444,10 @@ class EnhancedSecuritySystemAPI:
             except Exception:
                 pass
             finally:
-                if websocket in self.client_connections:
-                    self.client_connections.remove(websocket)
-                logger.info(f"🔌 WebSocket disconnected. Total: {len(self.client_connections)}")
+                with self.client_lock:
+                    self.client_queues.pop(websocket, None)
+                    client_count = len(self.client_queues)
+                logger.info(f"🔌 WebSocket disconnected. Total: {client_count}")
     
     def setup_background_tasks(self):
         """Setup multi-threaded processing pipeline with demographics and HAR"""
@@ -1904,9 +1981,19 @@ class EnhancedSecuritySystemAPI:
                                         break
                             confirmed_fire = [r for r in (fire_results or [])
                                               if r.get('confirmed') and r.get('alert')]
+                            # Unauthorized vehicles: a readable plate not on the
+                            # authorized list. Skip failed OCR reads ('UNKNOWN').
+                            def _plate_authorised(r):
+                                a = r.get('authorised')
+                                return a if a is not None else r.get('is_authorized')
+                            unauthorized_plates = [
+                                r for r in (plate_results or [])
+                                if not _plate_authorised(r)
+                                and (r.get('plate') or r.get('plate_number')) not in (None, '', 'UNKNOWN')
+                            ]
                             if not has_alarm and (confirmed_fire or
                                     [r for r in (har_results or []) if r.get('class') != 'normal'] or
-                                    weapon_results):
+                                    weapon_results or unauthorized_plates):
                                 has_alarm = True
 
                             # Also flag when any face (unknown or recognized-but-unauthorized)
@@ -1942,7 +2029,8 @@ class EnhancedSecuritySystemAPI:
                                             camera_id, 'face', 'critical',
                                             f"Unauthorized person detected ({(r.get('confidence', 0) * 100):.0f}% confidence)",
                                             snapshot_b64,
-                                            {'confidence': r.get('confidence'), 'bbox': r.get('bbox')}
+                                            {'confidence': r.get('confidence'), 'bbox': r.get('bbox')},
+                                            dedup_subject=f"unknown:{self._bbox_position_bucket(r.get('bbox'))}"
                                         )
 
                             # Zone authorization check: recognized person in restricted zone
@@ -1963,7 +2051,8 @@ class EnhancedSecuritySystemAPI:
                                         f"{cls_lower.upper()} detected ({(r.get('confidence', 0) * 100):.0f}% confidence)",
                                         snapshot_b64,
                                         {'class': cls_lower, 'confidence': r.get('confidence'),
-                                         'area_ratio': r.get('area_ratio')}
+                                         'area_ratio': r.get('area_ratio')},
+                                        dedup_subject=cls_lower
                                     )
 
                             # HAR alarms (non-normal actions)
@@ -1976,7 +2065,8 @@ class EnhancedSecuritySystemAPI:
                                             camera_id, 'har', sev,
                                             f"{label} detected ({(r.get('confidence', 0) * 100):.0f}% confidence)",
                                             snapshot_b64,
-                                            {'action': r.get('class'), 'confidence': r.get('confidence')}
+                                            {'action': r.get('class'), 'confidence': r.get('confidence')},
+                                            dedup_subject=r.get('class')
                                         )
 
                             # Weapon alarms
@@ -1988,8 +2078,24 @@ class EnhancedSecuritySystemAPI:
                                         camera_id, 'weapon', sev,
                                         f"{cls} detected ({(r.get('confidence', 0) * 100):.0f}% confidence)",
                                         snapshot_b64,
-                                        {'class': r.get('class'), 'confidence': r.get('confidence')}
+                                        {'class': r.get('class'), 'confidence': r.get('confidence')},
+                                        dedup_subject=(r.get('class') or 'weapon')
                                     )
+
+                            # Unauthorized plate alarms (readable plate not on the
+                            # authorized list). Deduped per plate number.
+                            for r in unauthorized_plates:
+                                plate = r.get('plate') or r.get('plate_number')
+                                self._create_alarm_if_needed(
+                                    camera_id, 'plate', 'high',
+                                    f"Unauthorized vehicle {plate} detected "
+                                    f"({(r.get('confidence', 0) * 100):.0f}% confidence)",
+                                    snapshot_b64,
+                                    {'plate': plate, 'owner': r.get('owner'),
+                                     'confidence': r.get('confidence'),
+                                     'bbox': r.get('bbox')},
+                                    dedup_subject=plate
+                                )
 
                             # Encode and queue for sending
                             self._encode_and_queue_frame(
@@ -2039,50 +2145,6 @@ class EnhancedSecuritySystemAPI:
         except Exception as e:
             logger.error(f"Plate processing error: {e}")
             return []
-    
-    def _bboxes_overlap(self, bbox1, bbox2, threshold=0.5):
-        """Check if two bounding boxes overlap significantly"""
-        x1, y1, w1, h1 = bbox1
-        x2, y2, w2, h2 = bbox2
-        
-        x_overlap = max(0, min(x1 + w1, x2 + w2) - max(x1, x2))
-        y_overlap = max(0, min(y1 + h1, y2 + h2) - max(y1, y2))
-        overlap_area = x_overlap * y_overlap
-        
-        area1 = w1 * h1
-        area2 = w2 * h2
-        union_area = area1 + area2 - overlap_area
-        
-        if union_area == 0:
-            return False
-        
-        iou = overlap_area / union_area
-        return iou > threshold
-    
-    def _get_bbox_key(self, bbox, grid_size=50):
-        """Generate a key for bbox to track same face across frames"""
-        x, y, w, h = bbox
-        center_x = x + w // 2
-        center_y = y + h // 2
-        grid_x = center_x // grid_size
-        grid_y = center_y // grid_size
-        return f"{grid_x}_{grid_y}_{w//10}_{h//10}"
-    
-    def _find_matching_unknown_face(self, bbox):
-        """Find if this bbox matches a previously detected unknown face"""
-        with self.unknown_faces_lock:
-            bbox_key = self._get_bbox_key(bbox)
-            
-            if bbox_key in self.unknown_faces_cache:
-                entry = self.unknown_faces_cache[bbox_key]
-                return entry, bbox_key
-            
-            # Check neighbours
-            for key, entry in self.unknown_faces_cache.items():
-                if entry.get('bbox') and self._bboxes_overlap(bbox, entry['bbox'], threshold=0.3):
-                    return entry, key
-        
-        return None, None
     
     def _is_frame_too_old(self, frame_id: int, max_age: int = 60) -> bool:
         """Check if frame is too old to wait for results"""
@@ -2189,17 +2251,30 @@ class EnhancedSecuritySystemAPI:
                 "weapon_detection_enabled": self.weapon_detection_enabled,
             }
             
-            try:
-                self.processed_frame_queue.put(message, block=False)
-            except queue.Full:
-                try:
-                    self.processed_frame_queue.get(block=False)
-                    self.processed_frame_queue.put(message, block=False)
-                except:
-                    pass
-                    
+            self._broadcast_frame(message)
+
         except Exception as e:
             logger.error(f"Error encoding frame: {e}")
+
+    def _broadcast_frame(self, message: dict):
+        """Fan out a processed frame to every connected client's own queue.
+
+        Each client has an independent queue; a slow client only drops its
+        own oldest frame and never starves the others.
+        """
+        with self.client_lock:
+            client_queues = list(self.client_queues.values())
+        for q in client_queues:
+            try:
+                q.put(message, block=False)
+            except queue.Full:
+                try:
+                    q.get(block=False)        # drop this client's oldest frame
+                    q.put(message, block=False)
+                except queue.Empty:
+                    pass
+                except queue.Full:
+                    pass
     
     def _log_detection_if_needed(self, camera_id: str, log_type: str,
                                  subject: str = None, confidence: float = None,
@@ -2230,16 +2305,45 @@ class EnhancedSecuritySystemAPI:
     def _create_alarm_if_needed(self, camera_id: str, alarm_type: str,
                                 severity: str, description: str,
                                 snapshot_base64: str = None,
-                                detection_metadata: Dict = None):
-        """Create an alarm in the database with deduplication (cooldown-based)"""
-        cooldown_key = f"{camera_id}:{alarm_type}"
+                                detection_metadata: Dict = None,
+                                dedup_subject: str = None):
+        """Create an alarm in the database with deduplication (cooldown-based).
+
+        `dedup_subject` distinguishes concurrent detections of the same type so
+        they don't collapse into one alarm — e.g. two unknown people (bucketed
+        by position), a knife vs a gun, or two different unauthorized persons.
+        When None, dedup falls back to per (camera, type) as before.
+        """
+        subject_key = dedup_subject or ''
+        cooldown_key = f"{camera_id}:{alarm_type}:{subject_key}"
         current_time = time.time()
 
         with self.alarm_lock:
             last_time = self.alarm_cooldowns.get(cooldown_key, 0)
             if current_time - last_time < self.alarm_cooldown_seconds:
                 return  # Skip — duplicate within cooldown
+            # Reserve the slot so concurrent threads don't both pass this gate.
             self.alarm_cooldowns[cooldown_key] = current_time
+
+        # The in-memory cooldown is wiped on restart, which would otherwise
+        # produce a burst of duplicate alarms right after the server comes
+        # back up. Confirm against the DB (cheap: only runs once per cooldown
+        # window per camera+type+subject, after the in-memory gate passes).
+        try:
+            recent = self.db.get_recent_alarm(
+                camera_id, alarm_type, self.alarm_cooldown_seconds,
+                dedup_subject=dedup_subject
+            )
+            if recent:
+                return  # An unresolved matching alarm already exists
+        except Exception as e:
+            logger.error(f"Error checking recent alarm: {e}")
+
+        # Persist the dedup subject in metadata so the DB backstop above can
+        # match on it after a restart.
+        meta = dict(detection_metadata) if detection_metadata else {}
+        if dedup_subject is not None:
+            meta['dedup_subject'] = dedup_subject
 
         try:
             self.db.create_alarm(
@@ -2248,11 +2352,23 @@ class EnhancedSecuritySystemAPI:
                 severity=severity,
                 description=description,
                 snapshot=snapshot_base64,
-                detection_metadata=convert_to_serializable(detection_metadata) if detection_metadata else None
+                detection_metadata=convert_to_serializable(meta) if meta else None
             )
             logger.info(f"🚨 Alarm created: [{severity.upper()}] {alarm_type} on {camera_id} — {description}")
         except Exception as e:
             logger.error(f"Error creating alarm: {e}")
+
+    @staticmethod
+    def _bbox_position_bucket(bbox, grid: int = 100) -> str:
+        """Coarse position key for a bbox center, so two simultaneous unknown
+        faces in different parts of the frame get separate alarms. Without a
+        per-person tracker this is the pragmatic discriminator; a person moving
+        across a grid boundary may produce an extra alarm (bounded by cooldown)."""
+        try:
+            x, y, w, h = bbox
+            return f"{(x + w // 2) // grid}_{(y + h // 2) // grid}"
+        except Exception:
+            return ''
 
     def _refresh_zone_caches(self, force: bool = False):
         """Refresh camera→zone and person→zones caches (TTL-based)."""
@@ -2359,6 +2475,11 @@ class EnhancedSecuritySystemAPI:
                 )
                 subject = f"{name} @ {zone_name}"
 
+            # Distinguish different people so two unauthorized persons in the
+            # same zone don't collapse: by employee_id when recognized, else by
+            # coarse position for unknowns.
+            zone_subject = (emp_id if not is_unknown
+                            else f"unknown:{self._bbox_position_bucket(r.get('bbox'))}")
             self._create_alarm_if_needed(
                 camera_id, 'unauthorized_zone', 'critical',
                 description, snapshot_b64,
@@ -2369,7 +2490,8 @@ class EnhancedSecuritySystemAPI:
                     'employee_id': emp_id,
                     'confidence': confidence,
                     'bbox': r.get('bbox'),
-                }
+                },
+                dedup_subject=zone_subject
             )
             try:
                 self._log_detection_if_needed(
@@ -2400,9 +2522,12 @@ class EnhancedSecuritySystemAPI:
             self.fire_results_queue,
             self.har_results_queue,           # NEW
             self.weapon_results_queue,
-            self.processed_frame_queue
         ]
-        
+
+        # Per-client output queues
+        with self.client_lock:
+            queues.extend(self.client_queues.values())
+
         for q in queues:
             while not q.empty():
                 try:

@@ -74,7 +74,11 @@ function App() {
     if (!isAuthenticated) return;
 
     const connectWebSocket = () => {
-      const websocket = new WebSocket(WS_URL);
+      // The backend authenticates the WebSocket via a ?token=<JWT> query param
+      // (browsers can't set Authorization headers on a WebSocket).
+      const token = localStorage.getItem('auth_token');
+      if (!token) return;
+      const websocket = new WebSocket(`${WS_URL}?token=${encodeURIComponent(token)}`);
 
       websocket.onopen = () => {
         console.log('WebSocket connected');
@@ -205,9 +209,16 @@ function App() {
         }
       };
 
-      websocket.onclose = () => {
+      websocket.onclose = (event) => {
         console.log('WebSocket disconnected');
         setIsConnected(false);
+        // 1008 = policy violation: the server rejected our token (missing/
+        // invalid/expired). Don't hammer it with reconnects — the user needs
+        // to re-authenticate.
+        if (event.code === 1008) {
+          console.warn('WebSocket auth rejected; not reconnecting.');
+          return;
+        }
         setTimeout(connectWebSocket, 3000);
       };
 
