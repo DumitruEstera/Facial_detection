@@ -413,7 +413,17 @@ function App() {
     setUserName(user.full_name || user.username || '');
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    // Revoke the token server-side first (best-effort). If this fails — e.g.
+    // network error — we still clear local state and the token expires naturally.
+    try {
+      await fetch(`${API_BASE}/api/logout`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+      });
+    } catch (error) {
+      console.error('Error revoking token on logout:', error);
+    }
     localStorage.removeItem('auth_token');
     localStorage.removeItem('auth_user');
     setIsAuthenticated(false);

@@ -156,6 +156,22 @@ class DatabaseManager:
                 )
             """)
 
+            # Explicitly revoked JWT tokens (logout / forced invalidation).
+            # Enables instant revocation of a session before its natural expiry
+            # (exp). Expired entries can be purged periodically.
+            self.cursor.execute("""
+                CREATE TABLE IF NOT EXISTS revoked_tokens (
+                    jti        UUID PRIMARY KEY,
+                    user_id    INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                    expires_at TIMESTAMP NOT NULL,
+                    revoked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            self.cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_revoked_tokens_expires
+                ON revoked_tokens (expires_at)
+            """)
+
             # Create alarms table
             self.cursor.execute("""
                 CREATE TABLE IF NOT EXISTS alarms (
@@ -1535,3 +1551,38 @@ class DatabaseManager:
             self.conn.rollback()
             print(f"Error deleting user: {e}")
             raise
+
+    def revoke_token(self, jti: str, user_id: int, expires_at) -> None:
+        """Add a token (by jti) to the revocation denylist."""
+        try:
+            self.cursor.execute(
+                """
+                INSERT INTO revoked_tokens (jti, user_id, expires_at)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (jti) DO NOTHING
+                """,
+                (jti, user_id, expires_at),
+            )
+            self.conn.commit()
+        except Exception as e:
+            self.conn.rollback()
+            print(f"Error revoking token: {e}")
+            raise
+
+    def is_token_revoked(self, jti: str) -> bool:
+        """Return True if the jti has been revoked (logout / forced invalidation)."""
+        if not jti:
+            return False
+        self.cursor.execute(
+            "SELECT 1 FROM revoked_tokens WHERE jti = %s", (jti,)
+        )
+        return self.cursor.fetchone() is not None
+
+    def purge_expired_revocations(self) -> int:
+        """Delete already-expired entries (no longer in effect). Returns row count."""
+        self.cursor.execute(
+            "DELETE FROM revoked_tokens WHERE expires_at < NOW()"
+        )
+        deleted = self.cursor.rowcount
+        self.conn.commit()
+        return deleted

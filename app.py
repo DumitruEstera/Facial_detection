@@ -17,6 +17,7 @@ from fastapi.responses import StreamingResponse
 import csv
 import io
 import os
+import uuid
 import secrets
 from dotenv import load_dotenv
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -136,13 +137,33 @@ class BulkUpdateAlarmsRequest(BaseModel):
 # random per-process secret so we never ship a known/hardcoded key — the
 # trade-off is that issued tokens stop validating after a restart, so set
 # JWT_SECRET in the environment for any real deployment.
+# Execution environment: "development" (default) or "production". In production
+# a missing/weak signing key is a fatal startup error (fail-fast) rather than a
+# warning, so a deployment can never run on an ephemeral per-process secret.
+APP_ENV = os.environ.get("APP_ENV", "development").lower()
+
 JWT_SECRET = os.environ.get("JWT_SECRET")
 if not JWT_SECRET:
+    if APP_ENV == "production":
+        raise RuntimeError(
+            "JWT_SECRET is not set. In production (APP_ENV=production) the signing "
+            "key must be provided explicitly via the JWT_SECRET environment variable "
+            "(at least 32 characters). Startup was aborted to prevent issuing tokens "
+            "with an ephemeral key."
+        )
+    # Acceptable fallback in development ONLY.
     JWT_SECRET = secrets.token_urlsafe(32)
     logger.warning(
         "⚠️ JWT_SECRET not set — using a random per-process secret. "
         "Tokens will be invalidated on restart. Set JWT_SECRET in the environment."
     )
+elif len(JWT_SECRET) < 32:
+    raise RuntimeError(
+        "JWT_SECRET is too short: at least 32 characters are recommended. "
+        "Generate a strong key, e.g.: "
+        "python -c \"import secrets; print(secrets.token_urlsafe(48))\""
+    )
+
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_HOURS = 8
 
@@ -160,6 +181,7 @@ def create_jwt_token(user_data: dict) -> str:
         "user_id": user_data["id"],
         "role": user_data["role"],
         "full_name": user_data.get("full_name", ""),
+        "jti": str(uuid.uuid4()),  # unique token id, used for instant revocation
         "exp": datetime.utcnow() + timedelta(hours=JWT_EXPIRATION_HOURS),
         "iat": datetime.utcnow()
     }
@@ -178,6 +200,10 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
     # Re-validate against the DB so a deleted user is rejected and a role change
     # takes effect on the next request — not only after the token expires.
     if _db_ref is not None:
+        # Instant revocation: a token on the denylist is rejected immediately
+        # (explicit logout / forced invalidation), before its natural expiry.
+        if _db_ref.is_token_revoked(payload.get("jti")):
+            raise HTTPException(status_code=401, detail="Token has been revoked")
         user = _db_ref.get_user_by_id(payload.get("user_id"))
         if not user:
             raise HTTPException(status_code=401, detail="User no longer exists")
@@ -234,6 +260,15 @@ class EnhancedSecuritySystemAPI:
         # against the live users table (immediate revocation on delete/role change).
         global _db_ref
         _db_ref = self.db
+
+        # Drop already-expired token revocations so the denylist doesn't grow
+        # unbounded (expired entries have no effect anyway).
+        try:
+            removed = self.db.purge_expired_revocations()
+            if removed:
+                logger.info(f"🧹 Purged {removed} expired token revocations.")
+        except Exception as e:
+            logger.warning(f"Could not purge expired token revocations: {e}")
 
         self.face_system = FacialRecognitionSystem(DB_CONFIG, camera_id="0")
         self.plate_system = LicensePlateRecognitionSystem(DB_CONFIG)
@@ -402,6 +437,20 @@ class EnhancedSecuritySystemAPI:
                     }
                 }
             raise HTTPException(status_code=401, detail="Invalid username or password")
+
+        @self.app.post("/api/logout")
+        async def logout(current_user: dict = Depends(get_current_user)):
+            """Revoke the current token (effective logout, before its expiry)."""
+            jti = current_user.get("jti")
+            exp = current_user.get("exp")  # epoch seconds, from the JWT payload
+            if jti and exp:
+                self.db.revoke_token(
+                    jti,
+                    current_user["user_id"],
+                    datetime.utcfromtimestamp(exp),
+                )
+            logger.info(f"🚪 User '{current_user.get('sub')}' logged out (token revoked)")
+            return {"status": "success", "message": "Logged out"}
 
         @self.app.get("/")
         async def root():
@@ -1418,6 +1467,12 @@ class EnhancedSecuritySystemAPI:
             except jwt.PyJWTError:
                 await websocket.close(code=1008)
                 logger.warning("🔒 WebSocket rejected: invalid/expired token")
+                return
+
+            # A revoked (logged-out) token must not be able to open the live feed.
+            if self.db.is_token_revoked(payload.get("jti")):
+                await websocket.close(code=1008)  # policy violation
+                logger.warning("🔒 WebSocket rejected: token has been revoked")
                 return
 
             # Re-validate against the DB so a deleted user can't keep streaming
