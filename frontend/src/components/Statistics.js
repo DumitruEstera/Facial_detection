@@ -202,7 +202,7 @@ const Statistics = ({ systemStatus }) => {
         fetch(`${API_BASE}/api/alarms/stats`, { headers }),
         fetch(`${API_BASE}/api/logs/timeseries?hours=${hours}`, { headers }),
         fetch(`${API_BASE}/api/logs/breakdown?hours=${hours}`, { headers }),
-        fetch(`${API_BASE}/api/statistics`, { headers }),
+        fetch(`${API_BASE}/api/stats`, { headers }),
       ]);
       if (!r1.ok || !r2.ok || !r3.ok || !r4.ok || !r5.ok) {
         throw new Error('One or more requests failed');

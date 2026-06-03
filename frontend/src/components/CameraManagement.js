@@ -37,7 +37,7 @@ const CameraManagement = () => {
   const fetchAll = useCallback(async () => {
     try {
       const [camRes, zoneRes] = await Promise.all([
-        fetch(`${API_BASE}/api/cameras-db`, { headers: getAuthHeaders() }),
+        fetch(`${API_BASE}/api/cameras`, { headers: getAuthHeaders() }),
         fetch(`${API_BASE}/api/zones`, { headers: getAuthHeaders() }),
       ]);
       if (camRes.ok) {
@@ -58,7 +58,7 @@ const CameraManagement = () => {
   const handleCreate = async (e) => {
     e.preventDefault();
     try {
-      const res = await fetch(`${API_BASE}/api/cameras-db`, {
+      const res = await fetch(`${API_BASE}/api/cameras`, {
         method: 'POST',
         headers: getAuthHeaders(),
         body: JSON.stringify({
@@ -97,7 +97,7 @@ const CameraManagement = () => {
       } else {
         body.zone_id = parseInt(editZoneId, 10);
       }
-      const res = await fetch(`${API_BASE}/api/cameras-db/${encodeURIComponent(cameraId)}`, {
+      const res = await fetch(`${API_BASE}/api/cameras/${encodeURIComponent(cameraId)}`, {
         method: 'PUT',
         headers: getAuthHeaders(),
         body: JSON.stringify(body),
@@ -118,7 +118,7 @@ const CameraManagement = () => {
   const handleDelete = async (cameraId) => {
     if (!window.confirm(`Delete camera "${cameraId}" from the registry? (This does not disconnect the live stream.)`)) return;
     try {
-      const res = await fetch(`${API_BASE}/api/cameras-db/${encodeURIComponent(cameraId)}`, {
+      const res = await fetch(`${API_BASE}/api/cameras/${encodeURIComponent(cameraId)}`, {
         method: 'DELETE', headers: getAuthHeaders(),
       });
       if (res.ok) {

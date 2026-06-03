@@ -259,7 +259,11 @@ function App() {
   // API functions
   const startCamera = async () => {
     try {
-      await fetch(`${API_BASE}/api/camera/start`, { method: 'POST', headers: getAuthHeaders() });
+      await fetch(`${API_BASE}/api/streams`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify({ source: 'local' })
+      });
       fetchStatus();
     } catch (error) {
       console.error('Error starting camera:', error);
@@ -268,7 +272,7 @@ function App() {
 
   const stopCamera = async () => {
     try {
-      await fetch(`${API_BASE}/api/camera/stop`, { method: 'POST', headers: getAuthHeaders() });
+      await fetch(`${API_BASE}/api/streams/CAM-01`, { method: 'DELETE', headers: getAuthHeaders() });
       fetchStatus();
     } catch (error) {
       console.error('Error stopping camera:', error);
@@ -277,10 +281,10 @@ function App() {
 
   const addIpCamera = async (url, cameraId, location) => {
     try {
-      const response = await fetch(`${API_BASE}/api/camera/add-ip`, {
+      const response = await fetch(`${API_BASE}/api/streams`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-        body: JSON.stringify({ url, camera_id: cameraId, location })
+        body: JSON.stringify({ source: 'ip', url, camera_id: cameraId, location })
       });
       const data = await response.json();
       if (data.status === 'success') {
@@ -301,10 +305,9 @@ function App() {
 
   const removeIpCamera = async (cameraId) => {
     try {
-      await fetch(`${API_BASE}/api/camera/remove-ip`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-        body: JSON.stringify({ camera_id: cameraId })
+      await fetch(`${API_BASE}/api/streams/${encodeURIComponent(cameraId)}`, {
+        method: 'DELETE',
+        headers: getAuthHeaders()
       });
       // Remove the camera from the list entirely
       setCameras(prevCameras => prevCameras.filter(c => c.id !== cameraId));

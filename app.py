@@ -445,50 +445,102 @@ class EnhancedSecuritySystemAPI:
                 "performance": convert_to_serializable(self.stats)
             }
         
-        @self.app.post("/api/camera/start")
-        async def start_camera(current_user: dict = Depends(require_admin)):
+        # ── Real-time stream control (resource: /api/streams) ─────────
+        # A "stream" is a live video source being processed right now, as
+        # opposed to the persisted camera configuration under /api/cameras.
+        # The laptop webcam is exposed under the reserved id "CAM-01".
+        LAPTOP_STREAM_ID = "CAM-01"
+
+        @self.app.post("/api/streams")
+        async def start_stream(request_data: dict = None, current_user: dict = Depends(require_admin)):
+            """Start a video stream.
+
+            Body:
+              {"source": "local"}  → start the laptop webcam (device 0, id CAM-01)
+              {"source": "ip", "url": ..., "camera_id": ..., "location": ...}
+                                   → connect an IP camera (e.g. phone via IP Webcam app)
+            """
+            request_data = request_data or {}
+            source = request_data.get("source", "local")
             try:
-                if not self.is_streaming:
-                    # Open the device off the event loop — VideoCapture can block
-                    # for seconds, which would freeze all HTTP/WebSocket handling.
-                    cap = await asyncio.to_thread(cv2.VideoCapture, 0)
-                    opened = await asyncio.to_thread(cap.isOpened)
-                    if opened:
-                        self.video_capture = cap
-                        self.is_streaming = True
-                        logger.info("📹 Camera started")
-                        return {"status": "success", "message": "Camera started"}
+                if source == "local":
+                    if not self.is_streaming:
+                        # Open the device off the event loop — VideoCapture can block
+                        # for seconds, which would freeze all HTTP/WebSocket handling.
+                        cap = await asyncio.to_thread(cv2.VideoCapture, 0)
+                        opened = await asyncio.to_thread(cap.isOpened)
+                        if opened:
+                            self.video_capture = cap
+                            self.is_streaming = True
+                            logger.info("📹 Camera started")
+                            return {"status": "success", "message": "Camera started",
+                                    "camera_id": LAPTOP_STREAM_ID}
+                        else:
+                            await asyncio.to_thread(cap.release)
+                            raise HTTPException(status_code=500, detail="Failed to open camera")
                     else:
+                        return {"status": "info", "message": "Camera already running",
+                                "camera_id": LAPTOP_STREAM_ID}
+
+                elif source == "ip":
+                    url = request_data.get("url")          # e.g. "http://192.168.1.5:8080/video"
+                    camera_id = request_data.get("camera_id", "CAM-02")
+                    location = request_data.get("location", "IP Camera")
+
+                    if not url:
+                        raise HTTPException(status_code=400, detail="URL is required")
+
+                    # Open the stream off the event loop. An unreachable URL makes
+                    # VideoCapture block for the full connection timeout, which would
+                    # otherwise freeze all HTTP and WebSocket handling.
+                    cap = await asyncio.to_thread(cv2.VideoCapture, url)
+                    opened = await asyncio.to_thread(cap.isOpened)
+                    if not opened:
                         await asyncio.to_thread(cap.release)
-                        raise HTTPException(status_code=500, detail="Failed to open camera")
+                        raise HTTPException(status_code=500, detail=f"Could not open video stream: {url}")
+
+                    with self.cameras_lock:
+                        # If camera_id already exists, release the old one
+                        if camera_id in self.cameras:
+                            old = self.cameras[camera_id]
+                            if old.get("capture"):
+                                old["capture"].release()
+
+                        self.cameras[camera_id] = {
+                            "capture": cap,
+                            "url": url,
+                            "location": location,
+                            "active": True,
+                        }
+
+                    # Persist into the cameras registry so zone assignment survives restart
+                    try:
+                        self.db.upsert_camera(
+                            camera_id=camera_id, name=location,
+                            location=location, stream_url=url, camera_type='ip'
+                        )
+                        self._refresh_zone_caches(force=True)
+                    except Exception as _e:
+                        logger.warning(f"Could not persist camera {camera_id}: {_e}")
+
+                    logger.info(f"📱 IP Camera added: {camera_id} -> {url}")
+                    return {
+                        "status": "success",
+                        "message": f"IP Camera {camera_id} connected",
+                        "camera_id": camera_id,
+                        "url": url,
+                    }
                 else:
-                    return {"status": "info", "message": "Camera already running"}
+                    raise HTTPException(status_code=400, detail=f"Unknown source: {source}")
             except HTTPException:
                 raise
             except Exception as e:
-                logger.error(f"❌ Error starting camera: {e}")
+                logger.error(f"❌ Error starting stream: {e}")
                 raise HTTPException(status_code=500, detail=str(e))
 
-        @self.app.post("/api/camera/stop")
-        async def stop_camera(current_user: dict = Depends(require_admin)):
-            try:
-                if self.is_streaming:
-                    self.is_streaming = False
-                    if self.video_capture:
-                        self.video_capture.release()
-                        self.video_capture = None
-                    self._clear_all_queues()
-                    logger.info("🛑 Laptop camera stopped")
-                    return {"status": "success", "message": "Laptop camera stopped"}
-                else:
-                    return {"status": "info", "message": "Laptop camera not running"}
-            except Exception as e:
-                logger.error(f"❌ Error stopping camera: {e}")
-                raise HTTPException(status_code=500, detail=str(e))
-
-        @self.app.post("/api/camera/stop-all")
-        async def stop_all_cameras(current_user: dict = Depends(require_admin)):
-            """Stop all cameras (laptop + IP)"""
+        @self.app.delete("/api/streams")
+        async def stop_all_streams(current_user: dict = Depends(require_admin)):
+            """Stop all streams (laptop + IP)"""
             try:
                 self.is_streaming = False
                 if self.video_capture:
@@ -506,70 +558,27 @@ class EnhancedSecuritySystemAPI:
             except Exception as e:
                 logger.error(f"❌ Error stopping all cameras: {e}")
                 raise HTTPException(status_code=500, detail=str(e))
-        
-        @self.app.post("/api/camera/add-ip")
-        async def add_ip_camera(request_data: dict, current_user: dict = Depends(require_admin)):
-            """Add an IP camera (e.g. phone via IP Webcam app)"""
+
+        @self.app.delete("/api/streams/{camera_id}")
+        async def stop_stream(camera_id: str, current_user: dict = Depends(require_admin)):
+            """Stop a single stream.
+
+            camera_id == CAM-01 stops the laptop webcam; any other id
+            disconnects the matching IP camera.
+            """
             try:
-                url = request_data.get("url")          # e.g. "http://192.168.1.5:8080/video"
-                camera_id = request_data.get("camera_id", "CAM-02")
-                location = request_data.get("location", "IP Camera")
-                
-                if not url:
-                    raise HTTPException(status_code=400, detail="URL is required")
+                if camera_id == LAPTOP_STREAM_ID:
+                    if self.is_streaming:
+                        self.is_streaming = False
+                        if self.video_capture:
+                            self.video_capture.release()
+                            self.video_capture = None
+                        self._clear_all_queues()
+                        logger.info("🛑 Laptop camera stopped")
+                        return {"status": "success", "message": "Laptop camera stopped"}
+                    else:
+                        return {"status": "info", "message": "Laptop camera not running"}
 
-                # Open the stream off the event loop. An unreachable URL makes
-                # VideoCapture block for the full connection timeout, which would
-                # otherwise freeze all HTTP and WebSocket handling.
-                cap = await asyncio.to_thread(cv2.VideoCapture, url)
-                opened = await asyncio.to_thread(cap.isOpened)
-                if not opened:
-                    await asyncio.to_thread(cap.release)
-                    raise HTTPException(status_code=500, detail=f"Could not open video stream: {url}")
-
-                with self.cameras_lock:
-                    # If camera_id already exists, release the old one
-                    if camera_id in self.cameras:
-                        old = self.cameras[camera_id]
-                        if old.get("capture"):
-                            old["capture"].release()
-                    
-                    self.cameras[camera_id] = {
-                        "capture": cap,
-                        "url": url,
-                        "location": location,
-                        "active": True,
-                    }
-
-                # Persist into the cameras registry so zone assignment survives restart
-                try:
-                    self.db.upsert_camera(
-                        camera_id=camera_id, name=location,
-                        location=location, stream_url=url, camera_type='ip'
-                    )
-                    self._refresh_zone_caches(force=True)
-                except Exception as _e:
-                    logger.warning(f"Could not persist camera {camera_id}: {_e}")
-
-                logger.info(f"📱 IP Camera added: {camera_id} -> {url}")
-                return {
-                    "status": "success",
-                    "message": f"IP Camera {camera_id} connected",
-                    "camera_id": camera_id,
-                    "url": url,
-                }
-            except HTTPException:
-                raise
-            except Exception as e:
-                logger.error(f"❌ Error adding IP camera: {e}")
-                raise HTTPException(status_code=500, detail=str(e))
-        
-        @self.app.post("/api/camera/remove-ip")
-        async def remove_ip_camera(request_data: dict, current_user: dict = Depends(require_admin)):
-            """Remove / disconnect an IP camera"""
-            try:
-                camera_id = request_data.get("camera_id", "CAM-02")
-                
                 cap = None
                 removed = False
                 with self.cameras_lock:
@@ -589,12 +598,12 @@ class EnhancedSecuritySystemAPI:
                 else:
                     return {"status": "info", "message": f"Camera {camera_id} not found"}
             except Exception as e:
-                logger.error(f"❌ Error removing IP camera: {e}")
+                logger.error(f"❌ Error stopping stream: {e}")
                 raise HTTPException(status_code=500, detail=str(e))
         
-        @self.app.get("/api/cameras/list")
-        async def list_cameras(current_user: dict = Depends(get_current_user)):
-            """List all active cameras"""
+        @self.app.get("/api/streams")
+        async def list_streams(current_user: dict = Depends(get_current_user)):
+            """List all active streams (laptop + IP)"""
             result = []
             
             # Laptop camera (CAM-01)
@@ -993,7 +1002,7 @@ class EnhancedSecuritySystemAPI:
             except Exception as e:
                 raise HTTPException(status_code=500, detail=str(e))
         
-        @self.app.get("/api/statistics")
+        @self.app.get("/api/stats")
         async def get_statistics(current_user: dict = Depends(get_current_user)):
             try:
                 stats = self.db.get_statistics()
@@ -1145,7 +1154,7 @@ class EnhancedSecuritySystemAPI:
 
         # ── Camera registry endpoints ──────────────────────────────
 
-        @self.app.get("/api/cameras-db")
+        @self.app.get("/api/cameras")
         async def list_cameras_db(current_user: dict = Depends(get_current_user)):
             """List all cameras with their zone assignments."""
             try:
@@ -1154,7 +1163,7 @@ class EnhancedSecuritySystemAPI:
             except Exception as e:
                 raise HTTPException(status_code=500, detail=str(e))
 
-        @self.app.post("/api/cameras-db")
+        @self.app.post("/api/cameras")
         async def create_camera_entry(req: CameraCreateRequest,
                                        current_user: dict = Depends(require_admin)):
             try:
@@ -1176,7 +1185,7 @@ class EnhancedSecuritySystemAPI:
             except Exception as e:
                 raise HTTPException(status_code=500, detail=str(e))
 
-        @self.app.put("/api/cameras-db/{camera_id}")
+        @self.app.put("/api/cameras/{camera_id}")
         async def update_camera_entry(camera_id: str, req: CameraUpdateRequest,
                                        current_user: dict = Depends(require_admin)):
             try:
@@ -1201,7 +1210,7 @@ class EnhancedSecuritySystemAPI:
             except Exception as e:
                 raise HTTPException(status_code=500, detail=str(e))
 
-        @self.app.delete("/api/cameras-db/{camera_id}")
+        @self.app.delete("/api/cameras/{camera_id}")
         async def delete_camera_entry(camera_id: str,
                                        current_user: dict = Depends(require_admin)):
             try:
